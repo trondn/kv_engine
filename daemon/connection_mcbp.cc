@@ -419,17 +419,31 @@ McbpConnection::TransmitResult McbpConnection::transmit() {
         if (res > 0) {
             get_thread_stats(this)->bytes_written += res;
 
-            /* We've written some of the data. Remove the completed
-               iovec entries from the list of pending writes. */
+            // We've written some of the data. Remove the completed iovec
+            // entries from the list of pending writes (and if the data was
+            // from our write buffer we should mark the section as unused)
             while (m->msg_iovlen > 0 && res >= ssize_t(m->msg_iov->iov_len)) {
+                write->consume([&m](const void* ptr, size_t size) -> ssize_t {
+                    if (m->msg_iov->iov_base == ptr) {
+                        return m->msg_iov->iov_len;
+                    }
+                    return 0;
+                });
+
                 res -= (ssize_t)m->msg_iov->iov_len;
                 m->msg_iovlen--;
                 m->msg_iov++;
             }
 
-            /* Might have written just part of the last iovec entry;
-               adjust it so the next write will do the rest. */
+            // Might have written just part of the last iovec entry; adjust it
+            // so the next write will do the rest.
             if (res > 0) {
+                write->consume([&m, &res](const void* ptr, size_t size) -> ssize_t {
+                    if (m->msg_iov->iov_base == ptr) {
+                        return res;
+                    }
+                    return 0;
+                });
                 m->msg_iov->iov_base = (void*)(
                     (unsigned char*)m->msg_iov->iov_base + res);
                 m->msg_iov->iov_len -= res;
@@ -781,7 +795,6 @@ McbpConnection::McbpConnection(SOCKET sfd, event_base *b)
     memset(&binary_header, 0, sizeof(binary_header));
     memset(&event, 0, sizeof(event));
     memset(&read, 0, sizeof(read));
-    memset(&write, 0, sizeof(write));
     msglist.reserve(MSG_LIST_INITIAL);
 
     if (!initializeEvent()) {
@@ -830,7 +843,6 @@ McbpConnection::McbpConnection(SOCKET sfd,
     memset(&binary_header, 0, sizeof(binary_header));
     memset(&event, 0, sizeof(event));
     memset(&read, 0, sizeof(read));
-    memset(&write, 0, sizeof(write));
     msglist.reserve(MSG_LIST_INITIAL);
 
     if (ifc.ssl.enabled) {
@@ -847,7 +859,6 @@ McbpConnection::McbpConnection(SOCKET sfd,
 
 McbpConnection::~McbpConnection() {
     cb_free(read.buf);
-    cb_free(write.buf);
 
     releaseReservedItems();
     for (auto* ptr : temp_alloc) {
@@ -888,6 +899,25 @@ static cJSON* to_json(const struct net_buf &buffer) {
     cJSON_AddNumberToObject(json, "size", buffer.size);
     cJSON_AddNumberToObject(json, "bytes", buffer.bytes);
     return json;
+}
+
+/**
+ * Create a JSON representation of a pipe
+ *
+ * @param pipe the pipe to get the information of
+ * @return the json representation of the object
+ */
+static unique_cJSON_ptr to_json(cb::Pipe* buffer) {
+    if (buffer == nullptr) {
+        return unique_cJSON_ptr{cJSON_CreateString("nullptr")};
+    }
+
+    unique_cJSON_ptr ret(cJSON_CreateObject());
+    buffer->stats([&ret](const char* key, const char* value) {
+        cJSON_AddStringToObject(ret.get(), key, value);
+    });
+
+    return ret;
 }
 
 /**
@@ -959,7 +989,7 @@ cJSON* McbpConnection::toJSON() const {
         }
 
         cJSON_AddItemToObject(obj, "read", to_json(read));
-        cJSON_AddItemToObject(obj, "write", to_json(write));
+        cJSON_AddItemToObject(obj, "write", to_json(write.get()).release());
 
         if (write_and_go != nullptr) {
             cJSON_AddStringToObject(obj, "write_and_go",
@@ -1188,8 +1218,30 @@ void McbpConnection::runEventLoop(short which) {
         }
     }
 
-    // MB-24634: Temporarily disabled
-    // conn_return_buffers(this);
+#if 0
+    // MB-24634: We're keeping this disabled to be able to measure the
+    //           effect of moving the code over to use the Pipe to
+    //           keep track of the data being written.
+    //           Releasing and reaquring the buffer could in theory
+    //           result in memory allocation.
+    conn_return_buffers(this);
+    if (write && !dcp) {
+        // Add a simple sanity check. We should only have a write buffer
+        // connected when we're in:
+        //    * execute (we may have started to create data in the buffer)
+        //    * conn_send_data (we're currently sending the data)
+        //    * closing (we jumped directly from the above)
+        auto state = getState();
+        if (!(state == conn_execute || state == conn_send_data ||
+              state == conn_closing || state == conn_immediate_close)) {
+            LOG_WARNING(this,
+                        "%u: Expected write buffer to be released, but it's not. Current state: %s",
+                        getId(),
+                        stateMachine->getCurrentTaskName());
+
+        }
+    }
+#endif
 }
 
 void McbpConnection::initiateShutdown() {
