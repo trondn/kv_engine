@@ -419,16 +419,22 @@ McbpConnection::TransmitResult McbpConnection::transmit() {
         if (res > 0) {
             get_thread_stats(this)->bytes_written += res;
 
+            // Optimization: calling consume() every time adds overhead
+            // in the loop (as it also (potentially) toggle the read/write
+            // flags for the underlying buffer (if valgrind integration is
+            // enabled). Cache the current read data.
+            auto pipe_rdata = write->rdata();
+
             // We've written some of the data. Remove the completed iovec
             // entries from the list of pending writes (and if the data was
             // from our write buffer we should mark the section as unused)
             while (m->msg_iovlen > 0 && res >= ssize_t(m->msg_iov->iov_len)) {
-                write->consume([&m](const void* ptr, size_t size) -> ssize_t {
-                    if (m->msg_iov->iov_base == ptr) {
+                if (pipe_rdata.data() == static_cast<uint8_t*>(m->msg_iov->iov_base)) {
+                    write->consume([&m](const void* ptr, size_t size) -> ssize_t {
                         return m->msg_iov->iov_len;
-                    }
-                    return 0;
-                });
+                    });
+                    pipe_rdata = write->rdata();
+                }
 
                 res -= (ssize_t)m->msg_iov->iov_len;
                 m->msg_iovlen--;
@@ -438,12 +444,11 @@ McbpConnection::TransmitResult McbpConnection::transmit() {
             // Might have written just part of the last iovec entry; adjust it
             // so the next write will do the rest.
             if (res > 0) {
-                write->consume([&m, &res](const void* ptr, size_t size) -> ssize_t {
-                    if (m->msg_iov->iov_base == ptr) {
+                if (pipe_rdata.data() == static_cast<uint8_t*>(m->msg_iov->iov_base)) {
+                    write->consume([res](const void* ptr, size_t size) -> ssize_t {
                         return res;
-                    }
-                    return 0;
-                });
+                    });
+                }
                 m->msg_iov->iov_base = (void*)(
                     (unsigned char*)m->msg_iov->iov_base + res);
                 m->msg_iov->iov_len -= res;
