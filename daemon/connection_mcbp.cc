@@ -429,10 +429,10 @@ McbpConnection::TransmitResult McbpConnection::transmit() {
             // entries from the list of pending writes (and if the data was
             // from our write buffer we should mark the section as unused)
             while (m->msg_iovlen > 0 && res >= ssize_t(m->msg_iov->iov_len)) {
-                if (pipe_rdata.data() == static_cast<uint8_t*>(m->msg_iov->iov_base)) {
-                    write->consumed(m->msg_iov->iov_len);
-                    pipe_rdata = write->rdata();
-                }
+//                if (pipe_rdata.data() == static_cast<uint8_t*>(m->msg_iov->iov_base)) {
+//                    write->consumed(m->msg_iov->iov_len);
+//                    pipe_rdata = write->rdata();
+//                }
 
                 res -= (ssize_t)m->msg_iov->iov_len;
                 m->msg_iovlen--;
@@ -442,9 +442,9 @@ McbpConnection::TransmitResult McbpConnection::transmit() {
             // Might have written just part of the last iovec entry; adjust it
             // so the next write will do the rest.
             if (res > 0) {
-                if (pipe_rdata.data() == static_cast<uint8_t*>(m->msg_iov->iov_base)) {
-                    write->consumed(res);
-                }
+//                if (pipe_rdata.data() == static_cast<uint8_t*>(m->msg_iov->iov_base)) {
+//                    write->consumed(res);
+//                }
                 m->msg_iov->iov_base = (void*)(
                     (unsigned char*)m->msg_iov->iov_base + res);
                 m->msg_iov->iov_len -= res;
@@ -465,6 +465,8 @@ McbpConnection::TransmitResult McbpConnection::transmit() {
                        }
                        return TransmitResult::SoftError;
                    }
+
+                    write->clear();
                    return TransmitResult::Complete;
                }
             }
@@ -508,6 +510,7 @@ McbpConnection::TransmitResult McbpConnection::transmit() {
         setState(conn_closing);
         return TransmitResult::HardError;
     } else {
+        write->clear();
         return TransmitResult::Complete;
     }
 }
