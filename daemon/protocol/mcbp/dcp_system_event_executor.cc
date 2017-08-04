@@ -78,24 +78,17 @@ ENGINE_ERROR_CODE dcp_message_system_event(const void* cookie,
     protocol_binary_request_dcp_system_event packet(
             opaque, vbucket, key.size(), eventData.size(), event, bySeqno);
 
+    auto wbuf = c->write->wdata();
+    if (wbuf.size() < sizeof(packet.bytes)) {
+        return ENGINE_E2BIG;
+    }
 
-    ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-    c->write->produce([&c, &packet, &key, &eventData, &ret](
-        void* ptr, size_t size) -> size_t {
-        if (size < sizeof(packet.bytes)) {
-            ret = ENGINE_E2BIG;
-            return 0;
-        }
+    std::copy(packet.bytes, packet.bytes + sizeof(packet.bytes), wbuf.data());
 
-        std::copy(packet.bytes,
-                  packet.bytes + sizeof(packet.bytes),
-                  static_cast<uint8_t*>(ptr));
+    c->addIov(wbuf.data(), sizeof(packet.bytes));
+    c->addIov(key.data(), key.size());
+    c->addIov(eventData.data(), eventData.size());
+    c->write->produced(sizeof(packet.bytes));
 
-        c->addIov(ptr, sizeof(packet.bytes));
-        c->addIov(key.data(), key.size());
-        c->addIov(eventData.data(), eventData.size());
-        return sizeof(packet.bytes);
-    });
-
-    return ret;
+    return ENGINE_SUCCESS;
 }

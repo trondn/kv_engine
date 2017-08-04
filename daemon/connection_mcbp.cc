@@ -430,9 +430,7 @@ McbpConnection::TransmitResult McbpConnection::transmit() {
             // from our write buffer we should mark the section as unused)
             while (m->msg_iovlen > 0 && res >= ssize_t(m->msg_iov->iov_len)) {
                 if (pipe_rdata.data() == static_cast<uint8_t*>(m->msg_iov->iov_base)) {
-                    write->consume([&m](const void* ptr, size_t size) -> ssize_t {
-                        return m->msg_iov->iov_len;
-                    });
+                    write->consumed(m->msg_iov->iov_len);
                     pipe_rdata = write->rdata();
                 }
 
@@ -445,9 +443,7 @@ McbpConnection::TransmitResult McbpConnection::transmit() {
             // so the next write will do the rest.
             if (res > 0) {
                 if (pipe_rdata.data() == static_cast<uint8_t*>(m->msg_iov->iov_base)) {
-                    write->consume([res](const void* ptr, size_t size) -> ssize_t {
-                        return res;
-                    });
+                    write->consumed(res);
                 }
                 m->msg_iov->iov_base = (void*)(
                     (unsigned char*)m->msg_iov->iov_base + res);

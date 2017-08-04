@@ -206,44 +206,42 @@ void mcbp_add_header(McbpConnection* c,
 
     c->addMsgHdr(true);
 
-    c->write->produce([c, err, ext_len, key_len, body_len, datatype](
-                              void* ptr, size_t size) -> size_t {
-        auto* header = static_cast<protocol_binary_response_header*>(ptr);
-        if (size < sizeof(*header)) {
-            /* We don't have room in the buffer */
-            throw std::logic_error(
-                    "mcbp_add_header: not enough space in output buffer!");
+    auto wbuf = c->write->wdata();
+    auto* header =
+            reinterpret_cast<protocol_binary_response_header*>(wbuf.data());
+    if (wbuf.size() < sizeof(*header)) {
+        /* We don't have room in the buffer */
+        throw std::logic_error(
+                "mcbp_add_header: not enough space in output buffer!");
+    }
+
+    header->response.magic = (uint8_t)PROTOCOL_BINARY_RES;
+    header->response.opcode = c->binary_header.request.opcode;
+    header->response.keylen = (uint16_t)htons(key_len);
+
+    header->response.extlen = ext_len;
+    header->response.datatype = datatype;
+    header->response.status = (uint16_t)htons(err);
+
+    header->response.bodylen = htonl(body_len);
+    header->response.opaque = c->getOpaque();
+    header->response.cas = htonll(c->getCAS());
+
+    if (settings.getVerbose() > 1) {
+        char buffer[1024];
+        if (bytes_to_output_string(buffer,
+                                   sizeof(buffer),
+                                   c->getId(),
+                                   false,
+                                   "Writing bin response:",
+                                   (const char*)header->bytes,
+                                   sizeof(header->bytes)) != -1) {
+            LOG_DEBUG(c, "%s", buffer);
         }
+    }
 
-        header->response.magic = (uint8_t)PROTOCOL_BINARY_RES;
-        header->response.opcode = c->binary_header.request.opcode;
-        header->response.keylen = (uint16_t)htons(key_len);
-
-        header->response.extlen = ext_len;
-        header->response.datatype = datatype;
-        header->response.status = (uint16_t)htons(err);
-
-        header->response.bodylen = htonl(body_len);
-        header->response.opaque = c->getOpaque();
-        header->response.cas = htonll(c->getCAS());
-
-        if (settings.getVerbose() > 1) {
-            char buffer[1024];
-            if (bytes_to_output_string(buffer,
-                                       sizeof(buffer),
-                                       c->getId(),
-                                       false,
-                                       "Writing bin response:",
-                                       (const char*)header->bytes,
-                                       sizeof(header->bytes)) != -1) {
-                LOG_DEBUG(c, "%s", buffer);
-            }
-        }
-
-        c->addIov(header, sizeof(header->bytes));
-        return sizeof(header->bytes);
-    });
-
+    c->addIov(header, sizeof(header->bytes));
+    c->write->produced(sizeof(header->bytes));
     ++c->getBucket().responseCounters[err];
 }
 

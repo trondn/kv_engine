@@ -285,22 +285,15 @@ static void process_bin_noop_response(McbpConnection* c) {
 
 static ENGINE_ERROR_CODE add_packet_to_pipe(McbpConnection* c,
                                             cb::const_byte_buffer packet) {
+    auto wbuf = c->write->wdata();
+    if (wbuf.size() < packet.size()) {
+        return ENGINE_E2BIG;
+    }
 
-    ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-    c->write->produce([c, packet, &ret](void* ptr, size_t size) -> size_t {
-        if (size < packet.size()) {
-            ret = ENGINE_E2BIG;
-            return 0;
-        }
-
-        std::copy(packet.begin(),
-                  packet.end(),
-                  static_cast<uint8_t*>(ptr));
-        c->addIov(ptr, packet.size());
-        return packet.size();
-    });
-
-    return ret;
+    std::copy(packet.begin(), packet.end(), wbuf.begin());
+    c->addIov(wbuf.data(), packet.size());
+    c->write->produced(packet.size());
+    return ENGINE_SUCCESS;
 }
 
 static ENGINE_ERROR_CODE dcp_message_get_failover_log(const void* void_cookie,
@@ -528,31 +521,25 @@ static ENGINE_ERROR_CODE dcp_message_control(const void* void_cookie,
     packet.message.header.request.keylen = ntohs(nkey);
     packet.message.header.request.bodylen = ntohl(nvalue + nkey);
 
-    ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-    c->write->produce([&c, &packet, &key, &nkey, &value, &nvalue, &ret](
-                              void* ptr, size_t size) -> size_t {
-        if (size < (sizeof(packet.bytes) + nkey + nvalue)) {
-            ret = ENGINE_E2BIG;
-            return 0;
-        }
+    auto wbuf = c->write->wdata();
+    if (wbuf.size() < (sizeof(packet.bytes) + nkey + nvalue)) {
+        return ENGINE_E2BIG;
+    }
 
-        std::copy(packet.bytes,
-                  packet.bytes + sizeof(packet.bytes),
-                  static_cast<uint8_t*>(ptr));
+    std::copy(packet.bytes, packet.bytes + sizeof(packet.bytes), wbuf.data());
 
-        std::copy(static_cast<const uint8_t*>(key),
-                  static_cast<const uint8_t*>(key) + nkey,
-                  static_cast<uint8_t*>(ptr) + sizeof(packet.bytes));
+    std::copy(static_cast<const uint8_t*>(key),
+              static_cast<const uint8_t*>(key) + nkey,
+              wbuf.data() + sizeof(packet.bytes));
 
-        std::copy(static_cast<const uint8_t*>(value),
-                  static_cast<const uint8_t*>(value) + nvalue,
-                  static_cast<uint8_t*>(ptr) + sizeof(packet.bytes) + nkey);
+    std::copy(static_cast<const uint8_t*>(value),
+              static_cast<const uint8_t*>(value) + nvalue,
+              wbuf.data() + sizeof(packet.bytes) + nkey);
 
-        c->addIov(ptr, sizeof(packet.bytes) + nkey + nvalue);
-        return sizeof(packet.bytes) + nkey + nvalue;
-    });
+    c->addIov(wbuf.data(), sizeof(packet.bytes) + nkey + nvalue);
+    c->write->produced(sizeof(packet.bytes) + nkey + nvalue);
 
-    return ret;
+    return ENGINE_SUCCESS;
 }
 
 void ship_mcbp_dcp_log(McbpConnection* c) {
