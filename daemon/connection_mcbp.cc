@@ -860,6 +860,7 @@ McbpConnection::McbpConnection(SOCKET sfd,
 
 McbpConnection::~McbpConnection() {
     cb_free(read.buf);
+    delete write;
 
     releaseReservedItems();
     for (auto* ptr : temp_alloc) {
@@ -990,7 +991,7 @@ cJSON* McbpConnection::toJSON() const {
         }
 
         cJSON_AddItemToObject(obj, "read", to_json(read));
-        cJSON_AddItemToObject(obj, "write", to_json(write.get()).release());
+        cJSON_AddItemToObject(obj, "write", to_json(write).release());
 
         if (write_and_go != nullptr) {
             cJSON_AddStringToObject(obj, "write_and_go",

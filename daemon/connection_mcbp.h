@@ -695,7 +695,7 @@ public:
     struct net_buf read;
 
     /** Write buffer */
-    std::unique_ptr<cb::Pipe> write;
+    cb::Pipe* write = new cb::Pipe(2048);
 
     const void* getCookie() const {
         return &cookie;
