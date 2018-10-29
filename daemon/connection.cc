@@ -716,6 +716,54 @@ void Connection::addIov(const void* buf, size_t len) {
     totalSend += len;
 }
 
+void Connection::copyToOutputStream(cb::const_char_buffer data) {
+    if (data.empty()) {
+        return;
+    }
+
+    if (bufferevent_write(bev.get(), data.data(), data.size()) == -1) {
+        throw std::bad_alloc();
+    }
+
+    totalSend += data.size();
+}
+
+void Connection::chainDataToOutputStream(cb::const_char_buffer data,
+                                         evbuffer_ref_cleanup_cb cleanupfn,
+                                         void* cleanupfn_arg) {
+    if (data.empty()) {
+        return;
+    }
+
+    if (evbuffer_add_reference(bufferevent_get_output(bev.get()),
+                               data.data(),
+                               data.size(),
+                               cleanupfn,
+                               cleanupfn_arg) == -1) {
+        throw std::bad_alloc();
+    }
+    totalSend += data.size();
+}
+
+static void sendbuffer_cleanup_cb(const void*, size_t, void* extra) {
+    delete reinterpret_cast<SendBuffer*>(extra);
+}
+
+void Connection::chainDataToOutputStream(std::unique_ptr<SendBuffer>& buffer) {
+    if (!buffer) {
+        throw std::logic_error(
+                "McbpConnection::chainDataToOutputStream: buffer must be set");
+    }
+
+    if (!buffer->getPayload().empty()) {
+        chainDataToOutputStream(
+                buffer->getPayload(), sendbuffer_cleanup_cb, buffer.get());
+        // Buffer successfully added to libevent and the callback will
+        // free the memory. Move the ownership of the buffer!
+        buffer.release();
+    }
+}
+
 void Connection::releaseReservedItems() {
     auto* bucketEngine = getBucket().getEngine();
     for (auto* it : reservedItems) {
