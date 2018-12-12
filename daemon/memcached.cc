@@ -61,6 +61,7 @@
 #include <cbsasl/logging.h>
 #include <cbsasl/mechanism.h>
 #include <engines/default_engine.h>
+#include <event2/thread.h>
 #include <mcbp/mcbp.h>
 #include <memcached/audit_interface.h>
 #include <memcached/rbac.h>
@@ -557,8 +558,6 @@ static void settings_init() {
     NetworkInterface default_interface;
     settings.addInterface(default_interface);
 
-    settings.setBioDrainBufferSize(8192);
-
     settings.setVerbose(0);
     settings.setConnectionIdleTime(0); // Connection idle time disabled
     settings.setNumWorkerThreads(get_number_of_worker_threads());
@@ -794,70 +793,6 @@ static void create_portnumber_file(bool terminate) {
                 exit(EXIT_FAILURE);
             }
             cb::io::rmrf(tempname);
-        }
-    }
-}
-
-void event_handler(evutil_socket_t fd, short which, void *arg) {
-    auto* c = reinterpret_cast<Connection*>(arg);
-    if (c == nullptr) {
-        LOG_WARNING("event_handler: connection must be non-NULL");
-        return;
-    }
-
-    auto& thr = c->getThread();
-
-    // Remove the list from the list of pending io's (in case the
-    // object was scheduled to run in the dispatcher before the
-    // callback for the worker thread is executed.
-    //
-    {
-        std::lock_guard<std::mutex> lock(thr.pending_io.mutex);
-        auto iter = thr.pending_io.map.find(c);
-        if (iter != thr.pending_io.map.end()) {
-            for (const auto& pair : iter->second) {
-                if (pair.first) {
-                    pair.first->setAiostat(pair.second);
-                    pair.first->setEwouldblock(false);
-                }
-            }
-            thr.pending_io.map.erase(iter);
-        }
-    }
-
-    // Remove the connection from the notification list if it's there
-    thr.notification.remove(c);
-
-    TRACE_LOCKGUARD_TIMED(thr.mutex,
-                          "mutex",
-                          "event_handler::threadLock",
-                          SlowMutexThreshold);
-
-    if (memcached_shutdown) {
-        // Someone requested memcached to shut down.
-        if (signal_idle_clients(thr) == 0) {
-            LOG_INFO("Stopping worker thread {}", thr.index);
-            c->eventBaseLoopbreak();
-            return;
-        }
-    }
-
-    /* sanity */
-    cb_assert(fd == c->getSocketDescriptor());
-
-    run_event_loop(c, which);
-
-    if (memcached_shutdown) {
-        // Someone requested memcached to shut down. If we don't have
-        // any connections bound to this thread we can just shut down
-        int connected = signal_idle_clients(thr);
-        if (connected == 0) {
-            LOG_INFO("Stopping worker thread {}", thr.index);
-            event_base_loopbreak(thr.base);
-        } else {
-            LOG_INFO("Waiting for {} connected clients on worker thread {}",
-                     connected,
-                     thr.index);
         }
     }
 }
@@ -2292,6 +2227,12 @@ extern "C" int memcached_main(int argc, char **argv) {
 
     max_file_handles = cb::io::maximizeFileDescriptors(
             std::numeric_limits<uint32_t>::max());
+
+#ifdef WIN32
+    evthread_use_windows_threads();
+#else
+    evthread_use_pthreads();
+#endif
 
     std::unique_ptr<ParentMonitor> parent_monitor;
 

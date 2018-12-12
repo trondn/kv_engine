@@ -428,26 +428,6 @@ public:
     }
 
     /**
-     * Get the size of the OpenSSL BIO buffers
-     *
-     * @return the size (in bytes) of the OpenSSL BIOs
-     */
-    unsigned int getBioDrainBufferSize() const {
-        return bio_drain_buffer_sz;
-    }
-
-    /**
-     * Set the size of the OpenSSL BIO buffers
-     *
-     * @param bio_drain_buffer_sz the new size in bytes
-     */
-    void setBioDrainBufferSize(unsigned int bio_drain_buffer_sz) {
-        Settings::bio_drain_buffer_sz = bio_drain_buffer_sz;
-        has.bio_drain_buffer_sz = true;
-        notify_changed("bio_drain_buffer_sz");
-    }
-
-    /**
      * Get the maximum size of a packet the system should try to inspect.
      * Packets exceeding this limit will cause the client to be disconnected
      *
@@ -848,11 +828,6 @@ protected:
     std::string root;
 
     /**
-     * size of the SSL bio buffers
-     */
-    unsigned int bio_drain_buffer_sz;
-
-    /**
      * is datatype json/snappy enabled?
      */
     bool datatype_json;
@@ -990,7 +965,6 @@ public:
         bool default_reqs_per_event;
         bool verbose;
         bool connection_idle_time;
-        bool bio_drain_buffer_sz;
         bool datatype_json;
         bool datatype_snappy;
         bool root;
