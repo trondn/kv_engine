@@ -1516,7 +1516,7 @@ static void subdoc_multi_mutation_response(Cookie& cookie,
 
     // Append extras if requested.
     if (extlen > 0) {
-        connection.addIov(reinterpret_cast<void*>(extras_ptr), extlen);
+        connection.copyToOutputStream({extras_ptr, extlen});
     }
 
     // Append the iovecs for each operation result.
@@ -1531,11 +1531,8 @@ static void subdoc_multi_mutation_response(Cookie& cookie,
                     char* header = response_buf.getCurrent();
                     size_t header_sz =
                             encode_multi_mutation_result_spec(index, op, header);
-
-                    connection.addIov(reinterpret_cast<void*>(header),
-                                      header_sz);
-                    connection.addIov(mloc.at, mloc.length);
-
+                    connection.copyToOutputStream({header, header_sz});
+                    connection.copyToOutputStream({mloc.at, mloc.length});
                     response_buf.moveOffset(header_sz);
                 }
             } else {
@@ -1545,8 +1542,7 @@ static void subdoc_multi_mutation_response(Cookie& cookie,
                     size_t header_sz =
                             encode_multi_mutation_result_spec(index, op, header);
 
-                    connection.addIov(reinterpret_cast<void*>(header),
-                                      header_sz);
+                    connection.copyToOutputStream({header, header_sz});
                     response_buf.moveOffset(header_sz);
 
                     // Only the first unsuccessful op is reported.
@@ -1634,10 +1630,10 @@ static void subdoc_multi_lookup_response(Cookie& cookie,
             *reinterpret_cast<uint32_t*>(header +
                                          sizeof(uint16_t)) = result_len;
 
-            connection.addIov(reinterpret_cast<void*>(header), header_sz);
+            connection.copyToOutputStream({header, header_sz});
 
             if (result_len != 0) {
-                connection.addIov(mloc.at, mloc.length);
+                connection.copyToOutputStream({mloc.at, mloc.length});
             }
             response_buf.moveOffset(header_sz);
         }
