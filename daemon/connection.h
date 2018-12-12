@@ -620,7 +620,7 @@ public:
 
     bool shouldDelete();
 
-    void runEventLoop(short which);
+    void runEventLoop();
 
     Cookie& getCookieObject() {
         return *cookies.front();

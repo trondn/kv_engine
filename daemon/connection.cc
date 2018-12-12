@@ -493,8 +493,8 @@ void Connection::enqueueServerEvent(std::unique_ptr<ServerEvent> event) {
 }
 
 void Connection::read_callback(bufferevent*, void* ctx) {
-    auto* instance = reinterpret_cast<Connection*>(ctx);
-    auto& thread = instance->getThread();
+    auto& instance = *reinterpret_cast<Connection*>(ctx);
+    auto& thread = instance.getThread();
 
     TRACE_LOCKGUARD_TIMED(thread.mutex,
                           "mutex",
@@ -507,7 +507,7 @@ void Connection::read_callback(bufferevent*, void* ctx) {
     //
     {
         std::lock_guard<std::mutex> lock(thread.pending_io.mutex);
-        auto iter = thread.pending_io.map.find(instance);
+        auto iter = thread.pending_io.map.find(&instance);
         if (iter != thread.pending_io.map.end()) {
             for (const auto& pair : iter->second) {
                 if (pair.first) {
@@ -520,14 +520,14 @@ void Connection::read_callback(bufferevent*, void* ctx) {
     }
 
     // Remove the connection from the notification list if it's there
-    thread.notification.remove(instance);
+    thread.notification.remove(&instance);
 
-    run_event_loop(instance, EV_READ);
+    run_event_loop(instance);
 }
 
 void Connection::write_callback(bufferevent*, void* ctx) {
-    auto* instance = reinterpret_cast<Connection*>(ctx);
-    auto& thread = instance->getThread();
+    auto& instance = *reinterpret_cast<Connection*>(ctx);
+    auto& thread = instance.getThread();
     TRACE_LOCKGUARD_TIMED(thread.mutex,
                           "mutex",
                           "Connection::write_callback::threadLock",
@@ -537,7 +537,7 @@ void Connection::write_callback(bufferevent*, void* ctx) {
     // callback for the worker thread is executed.
     {
         std::lock_guard<std::mutex> lock(thread.pending_io.mutex);
-        auto iter = thread.pending_io.map.find(instance);
+        auto iter = thread.pending_io.map.find(&instance);
         if (iter != thread.pending_io.map.end()) {
             for (const auto& pair : iter->second) {
                 if (pair.first) {
@@ -550,30 +550,30 @@ void Connection::write_callback(bufferevent*, void* ctx) {
     }
 
     // Remove the connection from the notification list if it's there
-    thread.notification.remove(instance);
-    run_event_loop(instance, EV_WRITE);
+    thread.notification.remove(&instance);
+    run_event_loop(instance);
 }
 
 void Connection::event_callback(bufferevent*, short event, void* ctx) {
-    auto* instance = reinterpret_cast<Connection*>(ctx);
+    auto& instance = *reinterpret_cast<Connection*>(ctx);
     bool term = false;
 
     if ((event & BEV_EVENT_EOF) == BEV_EVENT_EOF) {
         LOG_DEBUG("{}: McbpConnection::on_event: Socket EOF: {}",
-                  instance->getId(),
+                  instance.getId(),
                   evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
         term = true;
     }
 
     if ((event & BEV_EVENT_ERROR) == BEV_EVENT_ERROR) {
         LOG_INFO("{}: McbpConnection::on_event: Socket error: {}",
-                 instance->getId(),
+                 instance.getId(),
                  evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
         term = true;
     }
 
     if (term) {
-        auto& thread = instance->getThread();
+        auto& thread = instance.getThread();
         TRACE_LOCKGUARD_TIMED(thread.mutex,
                               "mutex",
                               "Connection::event_callback::threadLock",
@@ -585,7 +585,7 @@ void Connection::event_callback(bufferevent*, short event, void* ctx) {
         //
         {
             std::lock_guard<std::mutex> lock(thread.pending_io.mutex);
-            auto iter = thread.pending_io.map.find(instance);
+            auto iter = thread.pending_io.map.find(&instance);
             if (iter != thread.pending_io.map.end()) {
                 for (const auto& pair : iter->second) {
                     if (pair.first) {
@@ -598,12 +598,12 @@ void Connection::event_callback(bufferevent*, short event, void* ctx) {
         }
 
         // Remove the connection from the notification list if it's there
-        thread.notification.remove(instance);
+        thread.notification.remove(&instance);
 
-        if (instance->getState() != StateMachine::State::pending_close) {
-            instance->setState(StateMachine::State::closing);
+        if (instance.getState() != StateMachine::State::pending_close) {
+            instance.setState(StateMachine::State::closing);
         }
-        run_event_loop(instance, EV_WRITE | EV_READ);
+        run_event_loop(instance);
     }
 }
 
@@ -982,7 +982,7 @@ bool Connection::processServerEvents() {
     return getState() != before;
 }
 
-void Connection::runEventLoop(short) {
+void Connection::runEventLoop() {
     numEvents = max_reqs_per_event;
 
     try {
