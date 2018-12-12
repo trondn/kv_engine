@@ -108,14 +108,23 @@ ENGINE_ERROR_CODE GetCommandContext::sendResponse() {
                     datatype);
 
     // Add the flags
-    connection.addIov(&info.flags, sizeof(info.flags));
+    connection.copyToOutputStream(
+            {reinterpret_cast<const char*>(&info.flags), sizeof(info.flags)});
 
     // Add the value
     if (shouldSendKey()) {
-        connection.addIov(key.data(), key.size());
+        connection.copyToOutputStream({key.data(), key.size()});
     }
 
-    connection.addIov(payload.buf, payload.len);
+    std::unique_ptr<SendBuffer> sendbuffer;
+    // we may use the item if we've didn't inflate it
+    if (buffer.size() == 0) {
+        sendbuffer = std::make_unique<ItemSendBuffer>(
+                it, payload, connection.getBucket());
+    } else {
+        sendbuffer = std::make_unique<CompressionSendBuffer>(buffer, payload);
+    }
+    connection.chainDataToOutputStream(sendbuffer);
     connection.setState(StateMachine::State::send_data);
     cb::audit::document::add(cookie, cb::audit::document::Operation::Read);
 

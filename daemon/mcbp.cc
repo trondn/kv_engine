@@ -32,27 +32,25 @@
 #include <platform/compress.h>
 #include <platform/string_hex.h>
 
-static cb::const_byte_buffer mcbp_add_header(Cookie& cookie,
-                                             cb::Pipe& pipe,
-                                             uint8_t opcode,
-                                             cb::mcbp::Status status,
-                                             uint8_t ext_len,
-                                             uint16_t key_len,
-                                             uint32_t body_len,
-                                             uint8_t datatype,
-                                             uint32_t opaque,
-                                             uint64_t cas) {
-    auto wbuf = pipe.wdata();
-    auto* header = (protocol_binary_response_header*)wbuf.data();
+void mcbp_add_header(Cookie& cookie,
+                     cb::mcbp::Status status,
+                     uint8_t ext_len,
+                     uint16_t key_len,
+                     uint32_t body_len,
+                     uint8_t datatype) {
+    auto& connection = cookie.getConnection();
+    const auto& header = cookie.getHeader();
 
-    header->response.setOpcode(cb::mcbp::ClientOpcode(opcode));
-    header->response.setExtlen(ext_len);
-    header->response.setDatatype(cb::mcbp::Datatype(datatype));
-    header->response.setStatus(status);
-    header->response.setOpaque(opaque);
-    header->response.setCas(cas);
+    cb::mcbp::Response response = {};
+    response.setOpcode(header.getRequest().getClientOpcode());
+    response.setKeylen(key_len);
+    response.setExtlen(ext_len);
+    response.setDatatype(cb::mcbp::Datatype(datatype));
+    response.setStatus(status);
+    response.setOpaque(header.getOpaque());
+    response.setCas(cookie.getCas());
 
-    if (cookie.isTracingEnabled()) {
+    if (connection.isTracingEnabled()) {
         // When tracing is enabled we'll be using the alternative
         // response header where we inject the framing header.
         // For now we'll just hard-code the adding of the bytes
@@ -63,72 +61,49 @@ static cb::const_byte_buffer mcbp_add_header(Cookie& cookie,
         // something so that we have a better understanding on how
         // we need to do that (it could be that we need to modify
         // an already existing section etc).
-        header->response.setMagic(cb::mcbp::Magic::AltClientResponse);
         // The framing extras when we just include the tracing information
         // is 3 bytes. 1 byte with id and length, then the 2 bytes
         // containing the actual data.
+
         const uint8_t framing_extras_size = MCBP_TRACING_RESPONSE_SIZE;
         const uint8_t tracing_framing_id = 0x02;
-
-        header->bytes[2] = framing_extras_size; // framing header extras 3 bytes
-        header->bytes[3] = uint8_t(key_len);
-        header->response.setBodylen(body_len + framing_extras_size);
+        response.setMagic(cb::mcbp::Magic::AltClientResponse);
+        response.setFramingExtraslen(framing_extras_size);
+        response.setBodylen(body_len + framing_extras_size);
 
         auto& tracer = cookie.getTracer();
         const auto val = htons(tracer.getEncodedMicros());
-        auto* ptr = header->bytes + sizeof(header->bytes);
+        char framing_extras[3];
+        auto* ptr = framing_extras;
         *ptr = tracing_framing_id;
         ptr++;
         memcpy(ptr, &val, sizeof(val));
-        pipe.produced(sizeof(header->bytes) + framing_extras_size);
-        return {wbuf.data(), sizeof(header->bytes) + framing_extras_size};
+
+        connection.copyToOutputStream(
+                {reinterpret_cast<const char*>(&response), sizeof(response)});
+        connection.copyToOutputStream({framing_extras, framing_extras_size});
     } else {
-        header->response.setMagic(cb::mcbp::Magic::ClientResponse);
-        header->response.setKeylen(key_len);
-        header->response.setFramingExtraslen(0);
-        header->response.setBodylen(body_len);
+        response.setMagic(cb::mcbp::Magic::ClientResponse);
+        response.setBodylen(body_len);
+        connection.copyToOutputStream(
+                {reinterpret_cast<const char*>(&response), sizeof(response)});
     }
 
-    pipe.produced(sizeof(header->bytes));
-    return {wbuf.data(), sizeof(header->bytes)};
-}
-
-void mcbp_add_header(Cookie& cookie,
-                     cb::mcbp::Status status,
-                     uint8_t ext_len,
-                     uint16_t key_len,
-                     uint32_t body_len,
-                     uint8_t datatype) {
-    auto& connection = cookie.getConnection();
-    const auto& header = cookie.getHeader();
-
-    const auto wbuf = mcbp_add_header(cookie,
-                                      *connection.write,
-                                      header.getOpcode(),
-                                      status,
-                                      ext_len,
-                                      key_len,
-                                      body_len,
-                                      datatype,
-                                      header.getOpaque(),
-                                      cookie.getCas());
-
     if (settings.getVerbose() > 1) {
-        auto* header = reinterpret_cast<const cb::mcbp::Header*>(wbuf.data());
+        const auto* hdr = reinterpret_cast<const cb::mcbp::Header*>(&response);
         try {
             LOG_TRACE("<{} Sending: {}",
                       connection.getId(),
-                      header->toJSON().dump());
+                      hdr->toJSON().dump());
         } catch (const std::exception&) {
             // Failed.. do a raw dump instead
             LOG_TRACE("<{} Sending: {}",
                       connection.getId(),
-                      cb::to_hex({wbuf.data(), sizeof(cb::mcbp::Header)}));
+                      cb::to_hex({reinterpret_cast<const uint8_t*>(&response),
+                                  sizeof(cb::mcbp::Header)}));
         }
     }
-
     ++connection.getBucket().responseCounters[uint16_t(status)];
-    connection.addIov(wbuf.data(), wbuf.size());
 }
 
 static bool mcbp_response_handler(const void* key,

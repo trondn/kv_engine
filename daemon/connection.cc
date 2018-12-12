@@ -197,10 +197,6 @@ nlohmann::json Connection::toJSON() const {
         ret["read"] = read->to_json();
     }
 
-    if (write) {
-        ret["write"] = write->to_json();
-    }
-
     ret["write_and_go"] = std::string(stateMachine.getStateName(write_and_go));
 
     ret["ssl"] = client_ctx != nullptr;
@@ -697,15 +693,7 @@ Connection::TryReadResult Connection::tryReadNetwork() {
 
 
 void Connection::addIov(const void* buf, size_t len) {
-    if (len == 0) {
-        return;
-    }
-
-    int nw = bufferevent_write(bev.get(), buf, len);
-    if (nw == -1) {
-        throw std::bad_alloc();
-    }
-    totalSend += len;
+    copyToOutputStream({static_cast<const char*>(buf), len});
 }
 
 void Connection::copyToOutputStream(cb::const_char_buffer data) {

@@ -271,24 +271,16 @@ void Cookie::sendNotMyVBucket() {
         return;
     }
 
-    const size_t needed = sizeof(cb::mcbp::Response) + pair.second->size();
-    if (!growDynamicBuffer(needed)) {
-        throw std::bad_alloc();
-    }
-    auto& buffer = getDynamicBuffer();
-    auto* buf = reinterpret_cast<uint8_t*>(buffer.getCurrent());
-    const auto& header = getHeader();
-    cb::mcbp::ResponseBuilder builder({buf, needed});
-    builder.setMagic(cb::mcbp::Magic::ClientResponse);
-    builder.setOpcode(header.getRequest().getClientOpcode());
-    builder.setStatus(cb::mcbp::Status::NotMyVbucket);
-    builder.setOpaque(header.getOpaque());
-    builder.setValue({reinterpret_cast<const uint8_t*>(pair.second->data()),
-                      pair.second->size()});
-    builder.validate();
-
-    buffer.moveOffset(needed);
-    sendDynamicBuffer();
+    // Send the new payload
+    mcbp_add_header(*this,
+                    cb::mcbp::Status::NotMyVbucket,
+                    0,
+                    0,
+                    uint32_t(pair.second->size()),
+                    PROTOCOL_BINARY_DATATYPE_JSON);
+    connection.copyToOutputStream({pair.second->data(), pair.second->size()});
+    connection.setState(StateMachine::State::send_data);
+    connection.setWriteAndGo(StateMachine::State::new_cmd);
     connection.setClustermapRevno(pair.first);
 }
 
@@ -331,14 +323,6 @@ void Cookie::sendResponse(cb::mcbp::Status status,
                           cb::const_char_buffer value,
                           cb::mcbp::Datatype datatype,
                           uint64_t cas) {
-    if (!connection.write->empty()) {
-        // We can't continue as we might already have references
-        // in the IOvector stack pointing into the existing buffer!
-        throw std::logic_error(
-                "Cookie::sendResponse: No data should have been inserted "
-                "in the write buffer!");
-    }
-
     if (datatype != cb::mcbp::Datatype::Raw &&
         datatype != cb::mcbp::Datatype::JSON) {
         throw std::runtime_error("Cookie::sendResponse: Unsupported datatype");
@@ -362,13 +346,6 @@ void Cookie::sendResponse(cb::mcbp::Status status,
                                  : cb::mcbp::Datatype::JSON;
     }
 
-    size_t needed = sizeof(cb::mcbp::Header) + value.size() + key.size() +
-                    extras.size();
-    if (isTracingEnabled()) {
-        needed += MCBP_TRACING_RESPONSE_SIZE;
-    }
-    connection.write->ensureCapacity(needed);
-
     mcbp_add_header(*this,
                     status,
                     uint8_t(extras.size()),
@@ -377,27 +354,9 @@ void Cookie::sendResponse(cb::mcbp::Status status,
                     connection.getEnabledDatatypes(
                             protocol_binary_datatype_t(datatype)));
 
-    if (!extras.empty()) {
-        auto wdata = connection.write->wdata();
-        std::copy(extras.begin(), extras.end(), wdata.begin());
-        connection.write->produced(extras.size());
-        connection.addIov(wdata.data(), extras.size());
-    }
-
-    if (!key.empty()) {
-        auto wdata = connection.write->wdata();
-        std::copy(key.begin(), key.end(), wdata.begin());
-        connection.write->produced(key.size());
-        connection.addIov(wdata.data(), key.size());
-    }
-
-    if (!value.empty()) {
-        auto wdata = connection.write->wdata();
-        std::copy(value.begin(), value.end(), wdata.begin());
-        connection.write->produced(value.size());
-        connection.addIov(wdata.data(), value.size());
-    }
-
+    connection.copyToOutputStream(extras);
+    connection.copyToOutputStream(key);
+    connection.copyToOutputStream(value);
     connection.setState(StateMachine::State::send_data);
     connection.setWriteAndGo(StateMachine::State::new_cmd);
 }

@@ -313,12 +313,6 @@ bool StateMachine::conn_new_cmd() {
         return true;
     }
 
-    if (!connection.write->empty()) {
-        LOG_WARNING("{}: Expected write buffer to be empty.. It's not! ({})",
-                    connection.getId(),
-                    connection.write->rsize());
-    }
-
     /*
      * In order to ensure that all clients will be served each
      * connection will only process a certain number of operations
@@ -476,10 +470,6 @@ bool StateMachine::conn_read_packet_body() {
 }
 
 bool StateMachine::conn_send_data() {
-    // We've copied everything over into libevents buffers so we can
-    // release all of the allocated resources
-    connection.write->clear();
-
     if (connection.getSendQueueSize() > settings.getMaxPacketSize()) {
         // We don't want the connection to allocate too much resources
         // so lets drain the send buffer before proceeding

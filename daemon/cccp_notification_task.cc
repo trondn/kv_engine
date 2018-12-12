@@ -79,8 +79,9 @@ public:
                         name.size() + // the name of the bucket
                         payload.second->size(); // The actual payload
 
-        connection.write->ensureCapacity(needed);
-        FrameBuilder<Request> builder(connection.write->wdata());
+        std::unique_ptr<char[]> backing(new char[needed]);
+        FrameBuilder<Request> builder(
+                {reinterpret_cast<uint8_t*>(backing.get()), needed});
         builder.setMagic(Magic::ServerRequest);
         builder.setDatatype(cb::mcbp::Datatype::JSON);
         builder.setOpcode(ServerOpcode::ClustermapChangeNotification);
@@ -96,8 +97,9 @@ public:
                  payload.second->size()});
 
         // Inject our packet into the stream!
-        connection.addIov(connection.write->wdata().data(), needed);
-        connection.write->produced(needed);
+        std::unique_ptr<SendBuffer> output(
+                new CharBufferSendBuffer(backing, {backing.get(), needed}));
+        connection.chainDataToOutputStream(output);
 
         connection.setState(StateMachine::State::send_data);
         connection.setWriteAndGo(StateMachine::State::new_cmd);
