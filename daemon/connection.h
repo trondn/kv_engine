@@ -32,7 +32,6 @@
 #include <memcached/openssl.h>
 #include <memcached/rbac.h>
 #include <nlohmann/json_fwd.hpp>
-#include <platform/pipe.h>
 #include <platform/sized_buffer.h>
 #include <platform/socket.h>
 
@@ -49,6 +48,12 @@ class ListeningPort;
 class ServerEvent;
 struct EngineIface;
 struct FrontEndThread;
+
+namespace cb {
+namespace mcbp {
+class Header;
+} // namespace mcbp
+} // namespace cb
 
 /**
  * The maximum number of character the core preserves for the
@@ -466,24 +471,6 @@ public:
      */
     void enableReadEvent();
 
-    enum class TryReadResult {
-        /** Data received on the socket and ready to parse */
-        DataReceived,
-        /** No data received on the socket */
-        NoDataReceived,
-        /** An error occurred on the socket */
-        Error,
-    };
-
-    /**
-     * read from network as much as we can, handle buffer overflow and
-     * connection close. Before reading, move the remaining incomplete fragment
-     * of a command (if any) to the beginning of the buffer.
-     *
-     * @return enum try_read_result
-     */
-    TryReadResult tryReadNetwork();
-
     const StateMachine::State getWriteAndGo() const {
         return write_and_go;
     }
@@ -635,14 +622,6 @@ public:
 
     void runEventLoop(short which);
 
-    /**
-     * Input buffer containing the data we've read of the socket. It is
-     * assigned to the connection when the connection is to be served, and
-     * returned to the thread context if the pipe is empty when we're done
-     * serving this connection.
-     */
-    std::unique_ptr<cb::Pipe> read;
-
     Cookie& getCookieObject() {
         return *cookies.front();
     }
@@ -659,6 +638,33 @@ public:
      * @return true if we've got the entire packet, false otherwise
      */
     bool isPacketAvailable() const;
+
+    /**
+     * Check to see if the next packet header is available
+     *
+     * @return true if we've got the packet header available.. false otherwise
+     */
+    bool isPacketHeaderAvailable() const;
+
+    /**
+     * Get the next packet available in the stream.
+     *
+     * The returned pointer is a pointer directly into the input buffer (and
+     * not allocated, so the user should NOT keep the pointer around or try
+     * to free it.
+     *
+     * @return nullptr if the entire packet isn't available
+     */
+    const cb::mcbp::Header* getPacket() const;
+
+    /**
+     * Get all of the available bytes (up to a maximum bumber of bytes) in
+     * the input stream in a continuous byte buffer.
+     *
+     * NOTE: THIS MIGHT CAUSE REALLOCATION of the input stream so it should
+     * NOT be used unless strictly needed
+     */
+    cb::const_byte_buffer getAvailableBytes(size_t max = 1024) const;
 
     /**
      * Is SASL disabled for this connection or not? (connection authenticated

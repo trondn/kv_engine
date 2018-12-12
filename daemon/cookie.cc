@@ -478,10 +478,12 @@ void Cookie::maybeLogSlowCommand(
 Cookie::Cookie(Connection& conn) : connection(conn) {
 }
 
-void Cookie::initialize(cb::const_byte_buffer header, bool tracing_enabled) {
+void Cookie::initialize(PacketContent content,
+                        cb::const_byte_buffer buffer,
+                        bool tracing_enabled) {
     reset();
     enableTracing = tracing_enabled;
-    setPacket(Cookie::PacketContent::Header, header);
+    setPacket(content, buffer);
     setCas(0);
     start = std::chrono::steady_clock::now();
     tracer.begin(cb::tracing::TraceCode::REQUEST, start);
