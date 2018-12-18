@@ -203,10 +203,6 @@ nlohmann::json Connection::toJSON() const {
 
     ret["write_and_go"] = std::string(stateMachine.getStateName(write_and_go));
 
-    nlohmann::json ilist;
-    ilist["size"] = reservedItems.size();
-    ret["itemlist"] = ilist;
-
     ret["ssl"] = client_ctx != nullptr;
     ret["total_recv"] = totalRecv;
     ret["total_send"] = totalSend;
@@ -760,14 +756,6 @@ void Connection::chainDataToOutputStream(std::unique_ptr<SendBuffer>& buffer) {
     }
 }
 
-void Connection::releaseReservedItems() {
-    auto* bucketEngine = getBucket().getEngine();
-    for (auto* it : reservedItems) {
-        bucketEngine->release(it);
-    }
-    reservedItems.clear();
-}
-
 Connection::Connection(FrontEndThread& thr)
     : socketDescriptor(INVALID_SOCKET),
       connectedToSystemPort(false),
@@ -876,8 +864,6 @@ Connection::~Connection() {
     if (authenticated && domain == cb::sasl::Domain::External) {
         externalAuthManager->logoff(username);
     }
-
-    releaseReservedItems();
 
     if (client_ctx) {
         SSL_free(client_ctx);
@@ -1109,9 +1095,6 @@ bool Connection::close() {
         // to the client won't be sent).
         disableReadEvent();
         cb::net::shutdown(socketDescriptor, SHUT_RD);
-
-        // Release all reserved items!
-        releaseReservedItems();
     }
 
     // Notify interested parties that the connection is currently being
@@ -1223,19 +1206,13 @@ size_t Connection::getSendQueueSize() const {
 
 ENGINE_ERROR_CODE Connection::add_packet_to_send_pipe(
         cb::const_byte_buffer packet) {
-    ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-    write->produce([this, packet, &ret](cb::byte_buffer buffer) -> size_t {
-        if (buffer.size() < packet.size()) {
-            ret = ENGINE_E2BIG;
-            return 0;
-        }
+    try {
+        copyToOutputStream(packet);
+    } catch (const std::bad_alloc&) {
+        return ENGINE_E2BIG;
+    }
 
-        std::copy(packet.begin(), packet.end(), buffer.begin());
-        addIov(buffer.data(), packet.size());
-        return packet.size();
-    });
-
-    return ret;
+    return ENGINE_SUCCESS;
 }
 
 ENGINE_ERROR_CODE Connection::deletionOrExpirationV2(
@@ -1260,17 +1237,6 @@ ENGINE_ERROR_CODE Connection::deletionOrExpirationV2(
                     log_str);
         return ENGINE_FAILED;
     }
-
-    if (!reserveItem(it.get())) {
-        LOG_WARNING("{}: Connection::{}: Failed to grow item array",
-                    getId(),
-                    log_str);
-        return ENGINE_FAILED;
-    }
-
-    // we've reserved the item, and it'll be released when we're done sending
-    // the item.
-    it.release();
 
     auto key = info.key;
     if (!isCollectionsSupported()) {
@@ -1522,15 +1488,6 @@ ENGINE_ERROR_CODE Connection::mutation(uint32_t opaque,
     char* root = reinterpret_cast<char*>(info.value[0].iov_base);
     cb::char_buffer buffer{root, info.value[0].iov_len};
 
-    if (!reserveItem(it.get())) {
-        LOG_WARNING("{}: Failed to grow item array", getId());
-        return ENGINE_FAILED;
-    }
-
-    // we've reserved the item, and it'll be released when we're done sending
-    // the item.
-    it.release();
-
     auto key = info.key;
     // The client doesn't support collections, so must not send an encoded key
     if (!isCollectionsSupported()) {
@@ -1565,108 +1522,56 @@ ENGINE_ERROR_CODE Connection::mutation(uint32_t opaque,
         req.setFramingExtraslen(sizeof(cb::mcbp::DcpStreamIdFrameInfo));
     }
 
-    ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-    write->produce([this,
-                    &req,
-                    &frameExtras,
-                    &extras,
-                    &buffer,
-                    &meta,
-                    &nmeta,
-                    &ret,
-                    &key,
-                    sid](cb::byte_buffer wbuf) -> size_t {
-        size_t headerSize = sizeof(extras) + sizeof(req) + nmeta;
+    try {
+        // Add the header
+        copyToOutputStream(
+                {reinterpret_cast<const uint8_t*>(&req), sizeof(req)});
         if (sid) {
-            headerSize += sizeof(frameExtras);
+            copyToOutputStream(frameExtras.getBuf());
         }
-        if (wbuf.size() < headerSize) {
-            ret = ENGINE_E2BIG;
-            return 0;
-        }
-
-        auto nextWbuf = std::copy_n(reinterpret_cast<const uint8_t*>(&req),
-                                    sizeof(req),
-                                    wbuf.begin());
-
-        if (sid) {
-            // Add the optional stream-ID
-            nextWbuf =
-                    std::copy_n(reinterpret_cast<const uint8_t*>(&frameExtras),
-                                sizeof(frameExtras),
-                                nextWbuf);
-        }
-
-        nextWbuf = std::copy_n(reinterpret_cast<const uint8_t*>(&extras),
-                               sizeof(extras),
-                               nextWbuf);
-
-        if (nmeta) {
-            // Add the optional meta section
-            std::copy(static_cast<const uint8_t*>(meta),
-                      static_cast<const uint8_t*>(meta) + nmeta,
-                      nextWbuf);
-        }
-
-        // Add the header (which includes extras, optional frame-extra and
-        // optional nmeta)
-        addIov(wbuf.data(), headerSize);
+        copyToOutputStream(
+                {reinterpret_cast<const uint8_t*>(&extras), sizeof(extras)});
 
         // Add the key
-        addIov(key.data(), key.size());
+        copyToOutputStream({key.data(), key.size()});
 
         // Add the value
-        addIov(buffer.data(), buffer.size());
+        if (!buffer.empty()) {
+            std::unique_ptr<SendBuffer> sendbuffer;
+            sendbuffer =
+                    std::make_unique<ItemSendBuffer>(it, buffer, getBucket());
+            chainDataToOutputStream(sendbuffer);
+        }
 
-        return headerSize;
-    });
+        // Add the optional meta section
+        copyToOutputStream({static_cast<const char*>(meta), nmeta});
+    } catch (const std::bad_alloc&) {
+        /// We might have written a partial message into the buffer so
+        /// we need to disconnect the client
+        return ENGINE_DISCONNECT;
+    }
 
-    return ret;
+    return ENGINE_SUCCESS;
 }
 
 ENGINE_ERROR_CODE Connection::deletionInner(const item_info& info,
                                             cb::const_byte_buffer packet,
                                             cb::const_byte_buffer extendedMeta,
                                             const DocKey& key) {
-    ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-    write->produce([this, &packet, &extendedMeta, &info, &ret, &key](
-                           cb::byte_buffer buffer) -> size_t {
-        if (buffer.size() <
-            (packet.size() +
-             cb::mcbp::unsigned_leb128<CollectionIDType>::getMaxSize() +
-             extendedMeta.size())) {
-            ret = ENGINE_E2BIG;
-            return 0;
-        }
+    try {
+        copyToOutputStream(packet);
+        copyToOutputStream({key.data(), key.size()});
+        copyToOutputStream(
+                {reinterpret_cast<const char*>(info.value[0].iov_base),
+                 info.nbytes});
+        copyToOutputStream(extendedMeta);
+    } catch (const std::bad_alloc&) {
+        // We might have written a partial message into the buffer so
+        // we need to disconnect the client
+        return ENGINE_DISCONNECT;
+    }
 
-        std::copy(packet.begin(), packet.end(), buffer.begin());
-
-        if (extendedMeta.size() > 0) {
-            std::copy(extendedMeta.begin(),
-                      extendedMeta.end(),
-                      buffer.data() + packet.size());
-        }
-
-        // Add the header + collection-ID (stored in buffer)
-        addIov(buffer.data(), packet.size());
-
-        // Add the key
-        addIov(key.data(), key.size());
-
-        // Add the optional payload (xattr)
-        if (info.nbytes > 0) {
-            addIov(info.value[0].iov_base, info.nbytes);
-        }
-
-        // Add the optional meta section
-        if (extendedMeta.size() > 0) {
-            addIov(buffer.data() + packet.size(), extendedMeta.size());
-        }
-
-        return packet.size() + extendedMeta.size();
-    });
-
-    return ret;
+    return ENGINE_SUCCESS;
 }
 
 ENGINE_ERROR_CODE Connection::deletion(uint32_t opaque,
@@ -1684,22 +1589,12 @@ ENGINE_ERROR_CODE Connection::deletion(uint32_t opaque,
         return ENGINE_FAILED;
     }
 
-    if (!reserveItem(it.get())) {
-        LOG_WARNING("{}: Connection::deletion: Failed to grow item array",
-                    getId());
-        return ENGINE_FAILED;
-    }
-
     // Should be using the V2 callback
     if (isCollectionsSupported()) {
         LOG_WARNING("{}: Connection::deletion: called when collections-enabled",
                     getId());
         return ENGINE_FAILED;
     }
-
-    // we've reserved the item, and it'll be released when we're done sending
-    // the item.
-    it.release();
 
     auto key = info.key;
     if (!isCollectionsSupported()) {
@@ -1906,16 +1801,6 @@ ENGINE_ERROR_CODE Connection::prepare(uint32_t opaque,
     char* root = reinterpret_cast<char*>(info.value[0].iov_base);
     cb::char_buffer buffer{root, info.value[0].iov_len};
 
-    if (!reserveItem(it.get())) {
-        LOG_WARNING("{}: Connection::prepare: Failed to grow item array",
-                    getId());
-        return ENGINE_FAILED;
-    }
-
-    // we've reserved the item, and it'll be released when we're done sending
-    // the item.
-    it.release();
-
     auto key = info.key;
 
     // The client doesn't support collections, so must not send an encoded key
@@ -1946,36 +1831,30 @@ ENGINE_ERROR_CODE Connection::prepare(uint32_t opaque,
     req.setCas(info.cas);
     req.setDatatype(cb::mcbp::Datatype(info.datatype));
 
-    ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-    write->produce([this, &req, &extras, &buffer, &ret, &key](
-                           cb::byte_buffer wbuf) -> size_t {
-        const size_t total = sizeof(extras) + sizeof(req);
-        if (wbuf.size() < total) {
-            ret = ENGINE_E2BIG;
-            return 0;
-        }
-
-        std::copy_n(reinterpret_cast<const uint8_t*>(&req),
-                    sizeof(req),
-                    wbuf.begin());
-        std::copy_n(reinterpret_cast<const uint8_t*>(&extras),
-                    sizeof(extras),
-                    wbuf.begin() + sizeof(req));
-
+    try {
         // Add the header
-        addIov(wbuf.data(), sizeof(req) + sizeof(extras));
+        copyToOutputStream(
+                {reinterpret_cast<const uint8_t*>(&req), sizeof(req)});
+        copyToOutputStream(
+                {reinterpret_cast<const uint8_t*>(&extras), sizeof(extras)});
 
         // Add the key
-        addIov(key.data(), key.size());
+        copyToOutputStream({key.data(), key.size()});
 
         // Add the value
-        addIov(buffer.data(), buffer.size());
-        return total;
-    });
+        if (!buffer.empty()) {
+            std::unique_ptr<SendBuffer> sendbuffer;
+            sendbuffer =
+                    std::make_unique<ItemSendBuffer>(it, buffer, getBucket());
+            chainDataToOutputStream(sendbuffer);
+        }
+    } catch (const std::bad_alloc&) {
+        /// We might have written a partial message into the buffer so
+        /// we need to disconnect the client
+        return ENGINE_DISCONNECT;
+    }
 
-    return ret;
-
-    return ENGINE_ENOTSUP;
+    return ENGINE_SUCCESS;
 }
 
 ENGINE_ERROR_CODE Connection::seqno_acknowledged(uint32_t opaque,
