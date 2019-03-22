@@ -249,7 +249,6 @@ void Cookie::sendDynamicBuffer() {
                 cookie_free_dynbuffer,
                 dynamicBuffer.getRoot());
         connection.setState(StateMachine::State::send_data);
-        connection.setWriteAndGo(StateMachine::State::new_cmd);
         dynamicBuffer.takeOwnership();
     }
 }
@@ -267,7 +266,6 @@ void Cookie::sendNotMyVBucket() {
                         0,
                         PROTOCOL_BINARY_RAW_BYTES);
         connection.setState(StateMachine::State::send_data);
-        connection.setWriteAndGo(StateMachine::State::new_cmd);
         return;
     }
 
@@ -280,7 +278,6 @@ void Cookie::sendNotMyVBucket() {
                     PROTOCOL_BINARY_DATATYPE_JSON);
     connection.copyToOutputStream({pair.second->data(), pair.second->size()});
     connection.setState(StateMachine::State::send_data);
-    connection.setWriteAndGo(StateMachine::State::new_cmd);
     connection.setClustermapRevno(pair.first);
 }
 
@@ -300,7 +297,6 @@ void Cookie::sendResponse(cb::mcbp::Status status) {
 
         mcbp_add_header(*this, status, 0, 0, 0, PROTOCOL_BINARY_RAW_BYTES);
         connection.setState(StateMachine::State::send_data);
-        connection.setWriteAndGo(StateMachine::State::new_cmd);
         return;
     }
 
@@ -358,7 +354,6 @@ void Cookie::sendResponse(cb::mcbp::Status status,
     connection.copyToOutputStream(key);
     connection.copyToOutputStream(value);
     connection.setState(StateMachine::State::send_data);
-    connection.setWriteAndGo(StateMachine::State::new_cmd);
 }
 
 const DocKey Cookie::getRequestKey() const {

@@ -102,7 +102,6 @@ public:
         connection.chainDataToOutputStream(output);
 
         connection.setState(StateMachine::State::send_data);
-        connection.setWriteAndGo(StateMachine::State::new_cmd);
         return true;
     }
 };
