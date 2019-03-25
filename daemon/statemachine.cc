@@ -77,8 +77,6 @@ const char* StateMachine::getStateName(State state) const {
         return "immediate_close";
     case StateMachine::State::destroyed:
         return "destroyed";
-    case StateMachine::State::validate:
-        return "validate";
     case StateMachine::State::execute:
         return "execute";
     case StateMachine::State::send_data:
@@ -106,7 +104,6 @@ bool StateMachine::isIdleState() const {
     case State::closing:
     case State::immediate_close:
     case State::destroyed:
-    case State::validate:
     case State::execute:
         return false;
     }
@@ -131,8 +128,6 @@ bool StateMachine::execute() {
         return conn_immediate_close();
     case StateMachine::State::destroyed:
         return conn_destroyed();
-    case StateMachine::State::validate:
-        return conn_validate();
     case StateMachine::State::execute:
         return conn_execute();
     case StateMachine::State::send_data:
@@ -217,8 +212,9 @@ bool StateMachine::conn_ship_log() {
     cookie.setEwouldblock(false);
 
     if (connection.isPacketAvailable()) {
-        try_read_mcbp_command(cookie);
-        return true;
+        cookie.initialize(connection.getPacket(),
+                          connection.isTracingEnabled());
+        return validate_input_packet();
     }
 
     const auto ret = connection.getBucket().getDcpIface()->step(
@@ -260,14 +256,12 @@ bool StateMachine::conn_read_packet() {
     }
 
     if (connection.isPacketAvailable()) {
-        // Parse the data in the input pipe and prepare the cookie for
-        // execution. If all data is available we'll move over to the execution
-        // phase, otherwise we'll wait for the data to arrive
-        try_read_mcbp_command(connection.getCookieObject());
-        return true;
+        connection.getCookieObject().initialize(connection.getPacket(),
+                                                connection.isTracingEnabled());
+        return validate_input_packet();
     }
 
-    connection.setState(StateMachine::State::waiting);
+    setCurrentState(State::waiting);
     return false;
 }
 
@@ -285,7 +279,7 @@ bool StateMachine::conn_new_cmd() {
     return !connection.maybeYield();
 }
 
-bool StateMachine::conn_validate() {
+bool StateMachine::validate_input_packet() {
     static McbpValidator packetValidator;
 
     if (is_bucket_dying(connection)) {
@@ -363,7 +357,7 @@ bool StateMachine::conn_execute() {
     mcbp_collect_timings(cookie);
 
     // Consume the packet we just executed from the input buffer
-    auto packet = cookie.getPacket(Cookie::PacketContent::Full);
+    auto packet = cookie.getPacket();
     if (evbuffer_drain(bufferevent_get_input(connection.bev.get()),
                        packet.size()) == -1) {
         throw std::runtime_error("conn_execute: Failed to drain buffer");

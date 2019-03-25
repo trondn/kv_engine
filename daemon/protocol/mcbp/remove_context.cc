@@ -158,7 +158,7 @@ ENGINE_ERROR_CODE RemoveCommandContext::storeItem() {
 
 ENGINE_ERROR_CODE RemoveCommandContext::removeItem() {
     uint64_t new_cas = input_cas;
-    const auto& request = cookie.getRequest(Cookie::PacketContent::Full);
+    const auto& request = cookie.getRequest();
     auto ret = bucket_remove(cookie,
                              key,
                              new_cas,

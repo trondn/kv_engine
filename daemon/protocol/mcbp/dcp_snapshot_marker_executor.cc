@@ -27,7 +27,7 @@ void dcp_snapshot_marker_executor(Cookie& cookie) {
 
     auto& connection = cookie.getConnection();
     if (ret == ENGINE_SUCCESS) {
-        auto& request = cookie.getRequest(Cookie::PacketContent::Full);
+        auto& request = cookie.getRequest();
         using cb::mcbp::request::DcpSnapshotMarkerPayload;
         auto extra = request.getExtdata();
         const auto* payload =
