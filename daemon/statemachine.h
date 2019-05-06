@@ -44,19 +44,9 @@ public:
          * possible next state:
          *   * closing - if the bucket is currently being deleted
          *   * read_packet - if the input buffer contains the next header
-         *   * waiting - we need more data
          *   * ship_log - (for DCP connections)
          */
         new_cmd,
-
-        /**
-         * Set up a read event for the connection
-         *
-         * possible next state:
-         *   * closing - if the bucket is currently being deleted
-         *   * read_packet - the bucket isn't being deleted
-         */
-        waiting,
 
         /**
          * read_packet_header tries to read from the network and fill the
@@ -64,8 +54,6 @@ public:
          *
          * possible next state:
          *   * closing - if the bucket is currently being deleted
-         *   * waiting - if we failed to read more data from the network
-         *               (DCP connections will enter ship_log)
          *   * execute - the entire packet is available in memory
          *   * send_data - if an error occurs and we want to tell the user
          *                 about the error before disconnecting.
@@ -201,7 +189,6 @@ protected:
     // The various methods implementing the logic for that state
     bool conn_ssl_init();
     bool conn_new_cmd();
-    bool conn_waiting();
     bool conn_read_packet();
     bool conn_closing();
     bool conn_pending_close();
