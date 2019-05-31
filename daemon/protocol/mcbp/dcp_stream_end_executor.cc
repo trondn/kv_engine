@@ -40,11 +40,10 @@ void dcp_stream_end_executor(Cookie& cookie) {
     ret = connection.remapErrorCode(ret);
     switch (ret) {
     case ENGINE_SUCCESS:
-        connection.setState(StateMachine::State::ship_log);
         break;
 
     case ENGINE_DISCONNECT:
-        connection.setState(StateMachine::State::closing);
+        connection.shutdown();
         break;
 
     case ENGINE_EWOULDBLOCK:

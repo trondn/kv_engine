@@ -68,6 +68,10 @@ std::string to_string(Connection::Priority priority) {
                                 std::to_string(int(priority)));
 }
 
+void Connection::shutdown() {
+    state = State::closing;
+}
+
 bool Connection::setTcpNoDelay(bool enable) {
     if (socketDescriptor == INVALID_SOCKET) {
         // Our unit test run without a connected socket (and there is
@@ -191,13 +195,29 @@ nlohmann::json Connection::toJSON() const {
     ret["dcp_no_value"] = isDcpNoValue();
     ret["max_reqs_per_event"] = max_reqs_per_event;
     ret["nevents"] = numEvents;
-    ret["state"] = getStateName();
+
+    switch (state) {
+    case State::running:
+        ret["state"] = "running";
+    case State::closing:
+        ret["state"] = "closing";
+    case State::pending_close:
+        ret["state"] = "pending close";
+    case State::immediate_close:
+        ret["state"] = "immediate close";
+    }
 
     ret["ssl"] = client_ctx != nullptr;
     ret["total_recv"] = totalRecv;
     ret["total_send"] = totalSend;
 
     ret["datatype"] = mcbp::datatype::to_string(datatype.getRaw()).c_str();
+
+
+    ret["sendqueue"]["size"] = sendQueueInfo.size;
+    ret["sendqueue"]["last"] = sendQueueInfo.last.time_since_epoch().count();
+    ret["sendqueue"]["term"] = sendQueueInfo.term;
+    ret["callbacks"] = num_callbacks.load();
 
     return ret;
 }
@@ -488,13 +508,276 @@ void Connection::enqueueServerEvent(std::unique_ptr<ServerEvent> event) {
     server_events.push(std::move(event));
 }
 
-void Connection::read_callback(bufferevent*, void* ctx) {
+void  Connection::executeWithOutOfOrder() {
+    numEvents = max_reqs_per_event;
+    const std::size_t maxActiveCommands(32);
+    if (!cookies.empty()) {
+        // Look at the existing commands and check possibly execute them
+        bool active = false;
+        auto iter = cookies.begin();
+        // Iterate over all of the cookies and try to execute them
+        // (and nuke the entries as they complete so that we may start
+        // new ones)
+        while (iter != cookies.end()) {
+            auto& cookie = *iter;
+
+            if (cookie->empty()) {
+                ++iter;
+                continue;
+            }
+
+            if (cookie->isEwouldblock()) {
+                // This cookie is waiting for an engine notification.
+                // Look at the next one
+                ++iter;
+                active = true;
+                continue;
+            }
+
+            if (active && !cookie->mayReorder()) {
+                // we've got active commands, and this command can't be
+                // reordered... stop executing!
+                break;
+            }
+
+            if (cookie->execute()) {
+                // The command executed successfully
+                if (iter == cookies.begin()) {
+                    cookie->reset();
+                    ++iter;
+                } else {
+                    iter = cookies.erase(iter);
+                }
+            } else {
+                ++iter;
+                active = true;
+            }
+
+            if (--numEvents == 0) {
+                // We've used out time slice
+                break;
+            }
+        }
+    }
+
+    // We might add more commands to the queue
+    if (is_bucket_dying(*this)) {
+        // we need to shut down the bucket
+        setAllowUnorderedExecution(false);
+        return;
+    } else if ( cookies.empty() || cookies.back()->empty() || cookies.back()->mayReorder()) {
+        auto input = bufferevent_get_input(bev.get());
+        bool stop = false;
+        while (!stop && cookies.size() < maxActiveCommands &&
+               isPacketAvailable() && numEvents > 0) {
+            std::unique_ptr<Cookie> cookie;
+            if (cookies.back()->empty()) {
+                cookie = std::move(cookies.back());
+                cookies.pop_back();
+            } else {
+                cookie = std::make_unique<Cookie>(*this);
+            }
+
+            cookie->initialize(getPacket(), isTracingEnabled());
+            auto drainSize = cookie->getPacket().size();
+
+            // I need to figure out what to do with subdoc..
+            // looks like it is keeping pointers within the package
+            cookie->preserveRequest();
+
+            const auto status = cookie->validate();
+            if (status != cb::mcbp::Status::Success) {
+                cookie->sendResponse(status);
+                if (status != cb::mcbp::Status::UnknownCommand) {
+                    state = State::closing;
+                    return;
+                }
+            } else {
+                // We may only start execute the packet if:
+                //  * We don't have any ongoing commands
+                //  * We have an ongoing command and this command allows
+                //    for reorder
+                if ((cookies.empty() || cookie->mayReorder()) &&
+                    cookie->execute()) {
+
+                    if (cookies.empty()) {
+                        // Add back the empty slot
+                        cookie->reset();
+                        cookies.push_back(std::move(cookie));
+                    }
+                } else {
+#if 0
+                    cookie->preserveRequest();
+#endif
+                    cookies.push_back(std::move(cookie));
+                    if (!cookies.back()->mayReorder()) {
+                        // Don't add commands as we need the last one to complete
+                        stop = true;
+                    }
+                }
+                --numEvents;
+            }
+
+            if (evbuffer_drain(input, drainSize) == -1) {
+                throw std::runtime_error(
+                        "Connection::executeCommandsCallback(): Failed to "
+                        "drain buffer");
+            }
+        }
+    }
+
+    // Do we have any server-side messages to send?
+    processServerEvents();
+
+    if ((cookies.size() < maxActiveCommands) && (getSendQueueSize() < settings.getMaxPacketSize())) {
+        enableReadEvent();
+        if (isPacketAvailable()) {
+            const auto opt =
+                    BEV_TRIG_IGNORE_WATERMARKS | BEV_TRIG_DEFER_CALLBACKS;
+            bufferevent_trigger(bev.get(), EV_READ, opt);
+        }
+    } else {
+        // The cookies pipeline is full, and we don't want to start executing
+        // even more commands..
+        disableReadEvent();
+    }
+}
+
+void Connection::checkSendQueueStuck(
+        std::chrono::steady_clock::time_point now) {
+    using std::chrono::duration_cast;
+    using std::chrono::microseconds;
+    using std::chrono::nanoseconds;
+
+    // Check for stuck clients
+    auto currentSendBufferSize = getSendQueueSize();
+    // is the send buffer stuck?
+    if (currentSendBufferSize == 0) {
+        sendQueueInfo.size = currentSendBufferSize;
+        return;
+    }
+
+    if (sendQueueInfo.size != currentSendBufferSize) {
+        sendQueueInfo.size = currentSendBufferSize;
+        sendQueueInfo.last = now;
+        return;
+    }
+
+    const auto limit = (getBucket().state == Bucket::State::Ready)
+                               ? std::chrono::seconds(29)
+                               : std::chrono::seconds(1);
+    if ((now - sendQueueInfo.last) > limit) {
+        LOG_WARNING(
+                "{}: send buffer stuck at {} for ~{} seconds. Shutting "
+                "down connection {}",
+                getId(),
+                sendQueueInfo.size,
+                limit.count(),
+                getDescription());
+
+        // We've not had any progress on the socket for "n" secs
+        // Forcibly shut down the connection!
+        sendQueueInfo.term = true;
+        state = State::closing;
+    }
+}
+
+bool Connection::executeCommandsCallback() {
+    using std::chrono::duration_cast;
+    using std::chrono::microseconds;
+    using std::chrono::nanoseconds;
+
+    ++num_callbacks;
+    const auto start = std::chrono::steady_clock::now();
+
+    checkSendQueueStuck(start);
+    if (state == State::running) {
+        try {
+            // continue to run the state machine
+            executeWithOutOfOrder();
+        } catch (const std::exception& e) {
+            // @todo add dump cookies!!!
+            state = State::closing;
+            LOG_WARNING("{}: Got exception. Closing connection: {}",
+                        getId(),
+                        e.what());
+        }
+    }
+
+    if (isDCP() && state == State::running) {
+        if (cookies.empty()) {
+            LOG_CRITICAL("@todo fixme COOKIES EMPTY!!!");
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            std::abort();
+        }
+        if (cookies.front()->empty()) {
+            bool more = true;
+            do {
+                const auto ret = getBucket().getDcpIface()->step(
+                        static_cast<const void*>(cookies.front().get()), this);
+                switch (remapErrorCode(ret)) {
+                case ENGINE_SUCCESS:
+                    more = (getSendQueueSize() < settings.getMaxPacketSize());
+                    break;
+                case ENGINE_EWOULDBLOCK:
+                    more = false;
+                    break;
+                default:
+                    LOG_WARNING(
+                            R"({}: step returned {} - closing connection {})",
+                            getId(),
+                            std::to_string(ret),
+                            getDescription());
+
+                    state = State::closing;
+                    more = false;
+                }
+            } while (more);
+        }
+    }
+
+    const auto stop = std::chrono::steady_clock::now();
+    const auto ns = duration_cast<nanoseconds>(stop - start);
+    scheduler_info[getThread().index].add(duration_cast<microseconds>(ns));
+    addCpuTime(ns);
+
+    if (state != State::running) {
+        if (state == State::closing) {
+            externalAuthManager->remove(*this);
+            close();
+        }
+
+        if (state == State::pending_close) {
+            close();
+        }
+
+        if (state == State::immediate_close) {
+            disassociate_bucket(*this);
+
+            // Do the final cleanup of the connection:
+            thread.notification.remove(this);
+            // remove from pending-io list
+            {
+                std::lock_guard<std::mutex> lock(thread.pending_io.mutex);
+                thread.pending_io.map.erase(this);
+            }
+
+            bev.reset();
+
+            // delete the object
+            return false;
+        }
+    }
+    return true;
+}
+
+void Connection::rw_callback(bufferevent*, void* ctx) {
     auto& instance = *reinterpret_cast<Connection*>(ctx);
     auto& thread = instance.getThread();
 
     TRACE_LOCKGUARD_TIMED(thread.mutex,
                           "mutex",
-                          "Connection::read_callback::threadLock",
+                          "Connection::rw_callback::threadLock",
                           SlowMutexThreshold);
 
     // Remove the list from the list of pending io's (in case the
@@ -517,52 +800,24 @@ void Connection::read_callback(bufferevent*, void* ctx) {
 
     // Remove the connection from the notification list if it's there
     thread.notification.remove(&instance);
-
-    run_event_loop(instance);
-}
-
-void Connection::write_callback(bufferevent*, void* ctx) {
-    auto& instance = *reinterpret_cast<Connection*>(ctx);
-    auto& thread = instance.getThread();
-    TRACE_LOCKGUARD_TIMED(thread.mutex,
-                          "mutex",
-                          "Connection::write_callback::threadLock",
-                          SlowMutexThreshold);
-    // Remove the list from the list of pending io's (in case the
-    // object was scheduled to run in the dispatcher before the
-    // callback for the worker thread is executed.
-    {
-        std::lock_guard<std::mutex> lock(thread.pending_io.mutex);
-        auto iter = thread.pending_io.map.find(&instance);
-        if (iter != thread.pending_io.map.end()) {
-            for (const auto& pair : iter->second) {
-                if (pair.first) {
-                    pair.first->setAiostat(pair.second);
-                    pair.first->setEwouldblock(false);
-                }
-            }
-            thread.pending_io.map.erase(iter);
-        }
+    if (!instance.executeCommandsCallback()) {
+        conn_destroy(&instance);
     }
-
-    // Remove the connection from the notification list if it's there
-    thread.notification.remove(&instance);
-    run_event_loop(instance);
 }
 
 void Connection::event_callback(bufferevent*, short event, void* ctx) {
     auto& instance = *reinterpret_cast<Connection*>(ctx);
+    ++instance.num_callbacks;
     bool term = false;
 
     if ((event & BEV_EVENT_EOF) == BEV_EVENT_EOF) {
-        LOG_DEBUG("{}: McbpConnection::on_event: Socket EOF: {}",
-                  instance.getId(),
-                  evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+        LOG_DEBUG("{}: Connection::on_event: Socket EOF",
+                  instance.getId());
         term = true;
     }
 
     if ((event & BEV_EVENT_ERROR) == BEV_EVENT_ERROR) {
-        LOG_INFO("{}: McbpConnection::on_event: Socket error: {}",
+        LOG_INFO("{}: Connection::on_event: Socket error: {}",
                  instance.getId(),
                  evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
         term = true;
@@ -596,17 +851,19 @@ void Connection::event_callback(bufferevent*, short event, void* ctx) {
         // Remove the connection from the notification list if it's there
         thread.notification.remove(&instance);
 
-        if (instance.getState() != StateMachine::State::pending_close) {
-            instance.setState(StateMachine::State::closing);
+        if (instance.state == State::running) {
+            instance.state = State::closing;
         }
-        run_event_loop(instance);
+
+        if (!instance.executeCommandsCallback()) {
+            conn_destroy(&instance);
+        }
     }
 }
 
 void Connection::ssl_read_callback(bufferevent* bev, void* ctx) {
     auto& instance = *reinterpret_cast<Connection*>(ctx);
     // Lets inspect the certificate before we'll do anything further
-    instance.setState(StateMachine::State::new_cmd);
     auto* ssl_st = bufferevent_openssl_get_ssl(bev);
     cb::openssl::unique_x509_ptr cert(SSL_get_peer_certificate(ssl_st));
     auto certResult = settings.lookupUser(cert.get());
@@ -640,7 +897,7 @@ void Connection::ssl_read_callback(bufferevent* bev, void* ctx) {
                     instance,
                     "Failed to use client provided X.509 certificate");
         }
-        instance.setState(StateMachine::State::closing);
+        instance.state = State::closing;
         if (!certResult.second.empty()) {
             LOG_WARNING(
                     "{}: conn_ssl_init: disconnection client due to error [{}]",
@@ -651,13 +908,13 @@ void Connection::ssl_read_callback(bufferevent* bev, void* ctx) {
 
     // update the callback to call the normal read callback
     bufferevent_setcb(bev,
-                      Connection::read_callback,
-                      Connection::write_callback,
+                      Connection::rw_callback,
+                      Connection::rw_callback,
                       Connection::event_callback,
                       ctx);
 
     // and let's call it to make sure we step through the state machinery
-    Connection::read_callback(bev, ctx);
+    Connection::rw_callback(bev, ctx);
 }
 
 void Connection::setAuthenticated(bool authenticated) {
@@ -755,7 +1012,6 @@ Connection::Connection(FrontEndThread& thr)
       thread(thr),
       peername("unknown"),
       sockname("unknown"),
-      stateMachine(*this),
       max_reqs_per_event(settings.getRequestsPerEventNotification(
               EventPriority::Default)) {
     updateDescription();
@@ -774,7 +1030,6 @@ Connection::Connection(SOCKET sfd,
       parent_port(ifc.port),
       peername(cb::net::getpeername(socketDescriptor)),
       sockname(cb::net::getsockname(socketDescriptor)),
-      stateMachine(*this),
       max_reqs_per_event(settings.getRequestsPerEventNotification(
               EventPriority::Default)) {
     setTcpNoDelay(true);
@@ -833,14 +1088,14 @@ Connection::Connection(SOCKET sfd,
                 base, sfd, client_ctx, BUFFEREVENT_SSL_ACCEPTING, 0));
         bufferevent_setcb(bev.get(),
                           Connection::ssl_read_callback,
-                          Connection::write_callback,
+                          Connection::rw_callback,
                           Connection::event_callback,
                           static_cast<void*>(this));
     } else {
         bev.reset(bufferevent_socket_new(base, sfd, 0));
         bufferevent_setcb(bev.get(),
-                          Connection::read_callback,
-                          Connection::write_callback,
+                          Connection::rw_callback,
+                          Connection::rw_callback,
                           Connection::event_callback,
                           static_cast<void*>(this));
     }
@@ -876,54 +1131,6 @@ void Connection::EventDeleter::operator()(bufferevent* ev) {
     }
 }
 
-void Connection::setState(StateMachine::State next_state) {
-    stateMachine.setCurrentState(next_state);
-}
-
-void Connection::runStateMachinery() {
-    // Check for stuck clients
-    auto currentSendBufferSize = getSendQueueSize();
-    // is the send buffer stuck?
-    if (currentSendBufferSize == 0) {
-        sendQueueInfo.size = currentSendBufferSize;
-    } else {
-        if (sendQueueInfo.size != currentSendBufferSize) {
-            sendQueueInfo.size = currentSendBufferSize;
-            sendQueueInfo.last = std::chrono::steady_clock::now();
-        } else {
-            const auto limit = (getBucket().state == Bucket::State::Ready)
-                                       ? std::chrono::seconds(29)
-                                       : std::chrono::seconds(1);
-            if ((std::chrono::steady_clock::now() - sendQueueInfo.last) >
-                limit) {
-                LOG_WARNING(
-                        "{}: send buffer stuck at {} for ~{} seconds. Shutting "
-                        "down connection {}",
-                        getId(),
-                        sendQueueInfo.size,
-                        limit.count(),
-                        getDescription());
-                // We've not had any progress on the socket for "n" secs
-                // Forcibly shut down the connection!
-                sendQueueInfo.term = true;
-                setState(StateMachine::State::closing);
-            }
-        }
-    }
-
-    if (settings.getVerbose() > 1) {
-        do {
-            LOG_DEBUG("{} - Running task: {}",
-                      getId(),
-                      stateMachine.getCurrentStateName());
-        } while (stateMachine.execute());
-    } else {
-        while (stateMachine.execute()) {
-            // empty
-        }
-    }
-}
-
 void Connection::setAgentName(cb::const_char_buffer name) {
     auto size = std::min(name.size(), agentName.size() - 1);
     std::copy(name.begin(), name.begin() + size, agentName.begin());
@@ -935,10 +1142,6 @@ void Connection::setConnectionId(cb::const_char_buffer uuid) {
     std::copy(uuid.begin(), uuid.begin() + size, connectionId.begin());
     // the uuid string shall always be zero terminated
     connectionId[size] = '\0';
-}
-
-bool Connection::shouldDelete() {
-    return getState() == StateMachine::State ::destroyed;
 }
 
 void Connection::setInternal(bool internal) {
@@ -1032,7 +1235,7 @@ bool Connection::processServerEvents() {
         return false;
     }
 
-    const auto before = getState();
+    const auto before = state;
 
     // We're waiting for the next command to arrive from the client
     // and we've got a server event to process. Let's start
@@ -1041,81 +1244,10 @@ bool Connection::processServerEvents() {
         server_events.pop();
     }
 
-    return getState() != before;
+    return state != before;
 }
 
-void Connection::runEventLoop() {
-    numEvents = max_reqs_per_event;
-
-    try {
-        runStateMachinery();
-    } catch (const std::exception& e) {
-        bool logged = false;
-        if (getState() == StateMachine::State::execute) {
-            try {
-                // Converting the cookie to json -> string could probably
-                // cause too much memory allcation. We don't want that to
-                // cause us to crash..
-                std::stringstream ss;
-                nlohmann::json array = nlohmann::json::array();
-                for (const auto& cookie : cookies) {
-                    if (cookie) {
-                        try {
-                            array.push_back(cookie->toJSON());
-                        } catch (const std::exception&) {
-                            // ignore
-                        }
-                    }
-                }
-                LOG_ERROR(
-                        R"({}: exception occurred in runloop during packet execution. Cookie info: {} - closing connection ({}): {})",
-                        getId(),
-                        array.dump(),
-                        getDescription(),
-                        e.what());
-                logged = true;
-            } catch (const std::bad_alloc&) {
-                // none
-            }
-        }
-
-        if (!logged) {
-            try {
-                LOG_ERROR(
-                        R"({}: exception occurred in runloop (state: "{}") - closing connection ({}): {})",
-                        getId(),
-                        getStateName(),
-                        getDescription(),
-                        e.what());
-            } catch (const std::exception&) {
-                // Ditch logging.. just shut down the connection
-            }
-        }
-
-        setState(StateMachine::State::closing);
-        /*
-         * In addition to setting the state to conn_closing
-         * we need to move execution foward by executing
-         * conn_closing() and the subsequent functions
-         * i.e. conn_pending_close() or conn_immediate_close()
-         */
-        try {
-            runStateMachinery();
-        } catch (const std::exception& e) {
-            try {
-                LOG_ERROR(
-                        R"({}: exception occurred in runloop whilst attempting to close connection ({}): {})",
-                        getId(),
-                        getDescription(),
-                        e.what());
-            } catch (const std::exception&) {
-                // Drop logging
-            }
-        }
-    }
-}
-
-bool Connection::close() {
+void Connection::close() {
     bool ewb = false;
     uint32_t rc = refcount;
 
@@ -1130,7 +1262,7 @@ bool Connection::close() {
         }
     }
 
-    if (getState() == StateMachine::State::closing) {
+    if (state == State::closing) {
         // We don't want any network notifications anymore. Start by disabling
         // all read notifications (We may have data in the write buffers we
         // want to send. It seems like we don't immediately send the data over
@@ -1158,11 +1290,10 @@ bool Connection::close() {
                     rc,
                     ewb,
                     getSendQueueSize());
-        setState(StateMachine::State::pending_close);
-        return false;
+        state = State::pending_close;
+    } else {
+        state = State::immediate_close;
     }
-    setState(StateMachine::State::immediate_close);
-    return true;
 }
 
 void Connection::propagateDisconnect() const {
@@ -1188,17 +1319,17 @@ bool Connection::maybeYield() {
 
 bool Connection::signalIfIdle() {
     for (const auto& c : cookies) {
-        if (c->isEwouldblock()) {
+        if (!c->empty() && c->isEwouldblock()) {
             return false;
         }
     }
 
-    if (stateMachine.isIdleState()) {
+    // @todo trond fixme!
+    if (state != State::immediate_close) {
         thread.notification.push(this);
         notify_thread(thread);
         return true;
     }
-
     return false;
 }
 
@@ -1218,7 +1349,7 @@ void Connection::setPriority(Connection::Priority priority) {
                 settings.getRequestsPerEventNotification(EventPriority::Low);
         return;
     }
-    throw std::invalid_argument("Unkown priority: " +
+    throw std::invalid_argument("Unknown priority: " +
                                 std::to_string(int(priority)));
 }
 

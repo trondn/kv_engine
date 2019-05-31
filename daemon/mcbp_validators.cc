@@ -399,8 +399,19 @@ Status McbpValidator::verify_header(Cookie& cookie,
             switch (id) {
             case cb::mcbp::request::FrameInfoId::Reorder:
                 if (data.empty()) {
-                    status = Status::NotSupported;
-                    cookie.setErrorContext("OoO is currently not supported");
+                    if (cookie.getConnection().allowUnorderedExecution()) {
+                        // We should allow all commands to set the Reorder
+                        // flag, but just ignore it for the commands we don't
+                        // support yet
+                        if (cb::mcbp::isReorderSupported(opcode)) {
+                            cookie.setReorder();
+                        }
+                        return true;
+                    } else {
+                        status = Status::Einval;
+                        cookie.setErrorContext(
+                                "OoO is not enabled on the connection");
+                    }
                 } else {
                     status = Status::Einval;
                     cookie.setErrorContext("Reorder should not contain value");

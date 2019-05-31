@@ -146,7 +146,6 @@ ENGINE_ERROR_CODE GatCommandContext::sendResponse() {
         sendbuffer = std::make_unique<CompressionSendBuffer>(buffer, payload);
     }
     connection.chainDataToOutputStream(sendbuffer);
-    connection.setState(StateMachine::State::send_data);
     cb::audit::document::add(cookie, cb::audit::document::Operation::Read);
     state = State::Done;
     return ENGINE_SUCCESS;
@@ -157,7 +156,6 @@ ENGINE_ERROR_CODE GatCommandContext::noSuchItem() {
     if (cookie.getRequest().isQuiet()) {
         ++connection.getBucket()
                     .responseCounters[int(cb::mcbp::Status::KeyEnoent)];
-        connection.setState(StateMachine::State::new_cmd);
     } else {
         cookie.sendResponse(cb::mcbp::Status::KeyEnoent);
     }

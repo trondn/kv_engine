@@ -32,7 +32,7 @@ void collections_set_manifest_executor(Cookie& cookie) {
 
     switch (ret) {
     case cb::engine_errc::disconnect:
-        connection.setState(StateMachine::State::closing);
+        connection.shutdown();
         break;
     default:
         cookie.sendResponse(ret);

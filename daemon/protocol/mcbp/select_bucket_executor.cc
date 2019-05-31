@@ -88,7 +88,7 @@ void select_bucket_executor(Cookie& cookie) {
     auto ret = connection.remapErrorCode(select_bucket(cookie, bucketname));
     cookie.logResponse(ret);
     if (ret == ENGINE_DISCONNECT) {
-        connection.setState(StateMachine::State::closing);
+        connection.shutdown();
         return;
     }
     cookie.sendResponse(cb::mcbp::to_status(cb::engine_errc(ret)));

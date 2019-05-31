@@ -233,6 +233,75 @@ TEST(ClientOpcode_to_opcode, SpaceMayBeUsed) {
     }
 }
 
+TEST(ClientOpcode, isReorderSupported) {
+    using cb::mcbp::ClientOpcode;
+    std::vector<ClientOpcode> supported = {{ClientOpcode::Get,
+                                            ClientOpcode::Getq,
+                                            ClientOpcode::Getk,
+                                            ClientOpcode::Getkq,
+                                            ClientOpcode::GetLocked,
+                                            ClientOpcode::UnlockKey,
+                                            ClientOpcode::Touch,
+                                            ClientOpcode::Gat,
+                                            ClientOpcode::Gatq,
+                                            ClientOpcode::SaslListMechs,
+                                            ClientOpcode::Delete,
+                                            ClientOpcode::Deleteq,
+                                            ClientOpcode::IsaslRefresh,
+                                            ClientOpcode::SslCertsRefresh,
+                                            ClientOpcode::ListBuckets,
+                                            ClientOpcode::GetMeta,
+                                            ClientOpcode::GetqMeta,
+                                            ClientOpcode::Verbosity,
+                                            ClientOpcode::AuditPut,
+                                            ClientOpcode::Increment,
+                                            ClientOpcode::Incrementq,
+                                            ClientOpcode::Decrement,
+                                            ClientOpcode::Decrementq,
+                                            ClientOpcode::IoctlGet,
+                                            ClientOpcode::IoctlSet,
+                                            ClientOpcode::ConfigValidate,
+                                            ClientOpcode::ConfigReload,
+                                            ClientOpcode::AuditConfigReload,
+                                            ClientOpcode::Version,
+                                            ClientOpcode::GetErrorMap,
+                                            ClientOpcode::AuthProvider,
+                                            ClientOpcode::RbacRefresh,
+                                            ClientOpcode::EvictKey,
+                                            ClientOpcode::GetCtrlToken,
+                                            ClientOpcode::GetReplica,
+                                            ClientOpcode::GetClusterConfig,
+                                            ClientOpcode::SetClusterConfig,
+                                            ClientOpcode::Add,
+                                            ClientOpcode::Addq,
+                                            ClientOpcode::Set,
+                                            ClientOpcode::Setq,
+                                            ClientOpcode::Replace,
+                                            ClientOpcode::Replaceq,
+                                            ClientOpcode::Append,
+                                            ClientOpcode::Appendq,
+                                            ClientOpcode::Prepend,
+                                            ClientOpcode::Prependq,
+                                            ClientOpcode::Scrub,
+                                            ClientOpcode::AdjustTimeofday,
+                                            ClientOpcode::GetCmdTimer,
+                                            ClientOpcode::GetRandomKey,
+                                            ClientOpcode::SetDriftCounterState,
+                                            ClientOpcode::GetAdjustedTime}};
+
+    for (int ii = 0; ii < 0x100; ++ii) {
+        const auto opcode = ClientOpcode(ii);
+        if (is_valid_opcode(opcode)) {
+            if (std::find(supported.begin(), supported.end(), opcode) !=
+                supported.end()) {
+                EXPECT_TRUE(isReorderSupported(opcode));
+            } else {
+                EXPECT_FALSE(isReorderSupported(opcode));
+            }
+        }
+    }
+}
+
 const std::map<cb::mcbp::ServerOpcode, std::string> server_blueprint = {
         {{ServerOpcode::ClustermapChangeNotification,
           "ClustermapChangeNotification"},

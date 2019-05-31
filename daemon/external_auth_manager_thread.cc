@@ -71,8 +71,6 @@ public:
         std::unique_ptr<SendBuffer> output(
                 new CharBufferSendBuffer(backing, {backing.get(), needed}));
         connection.chainDataToOutputStream(output);
-
-        connection.setState(StateMachine::State::send_data);
         return true;
     }
 
@@ -112,8 +110,6 @@ public:
         std::unique_ptr<SendBuffer> output(
                 new CharBufferSendBuffer(backing, {backing.get(), needed}));
         connection.chainDataToOutputStream(output);
-
-        connection.setState(StateMachine::State::send_data);
         return true;
     }
 

@@ -582,3 +582,188 @@ std::ostream& operator<<(std::ostream& out, cb::mcbp::ServerOpcode opcode) {
     out << to_string(opcode);
     return out;
 }
+
+bool cb::mcbp::isReorderSupported(ClientOpcode opcode) {
+    switch (opcode) {
+    case ClientOpcode::Get:
+    case ClientOpcode::Getq:
+    case ClientOpcode::Getk:
+    case ClientOpcode::Getkq:
+    case ClientOpcode::GetLocked:
+    case ClientOpcode::UnlockKey:
+    case ClientOpcode::Touch:
+    case ClientOpcode::Gat:
+    case ClientOpcode::Gatq:
+    case ClientOpcode::SaslListMechs:
+    case ClientOpcode::Delete:
+    case ClientOpcode::Deleteq:
+    case ClientOpcode::IsaslRefresh:
+    case ClientOpcode::SslCertsRefresh:
+    case ClientOpcode::ListBuckets:
+    case ClientOpcode::GetMeta:
+    case ClientOpcode::GetqMeta:
+    case ClientOpcode::Verbosity:
+    case ClientOpcode::AuditPut:
+    case ClientOpcode::Increment:
+    case ClientOpcode::Decrement:
+    case ClientOpcode::Incrementq:
+    case ClientOpcode::Decrementq:
+    case ClientOpcode::IoctlGet:
+    case ClientOpcode::IoctlSet:
+    case ClientOpcode::ConfigValidate:
+    case ClientOpcode::ConfigReload:
+    case ClientOpcode::AuditConfigReload:
+    case ClientOpcode::Version:
+    case ClientOpcode::GetErrorMap:
+    case ClientOpcode::AuthProvider:
+    case ClientOpcode::RbacRefresh:
+    case ClientOpcode::EvictKey:
+    case ClientOpcode::GetCtrlToken:
+    case ClientOpcode::GetReplica:
+    case ClientOpcode::SetClusterConfig:
+    case ClientOpcode::GetClusterConfig:
+    case ClientOpcode::Add:
+    case ClientOpcode::Addq:
+    case ClientOpcode::Replace:
+    case ClientOpcode::Replaceq:
+    case ClientOpcode::Set:
+    case ClientOpcode::Setq:
+    case ClientOpcode::Append:
+    case ClientOpcode::Appendq:
+    case ClientOpcode::Prepend:
+    case ClientOpcode::Prependq:
+    case ClientOpcode::Scrub:
+    case ClientOpcode::AdjustTimeofday:
+    case ClientOpcode::GetCmdTimer:
+    case ClientOpcode::GetRandomKey:
+
+    case ClientOpcode::SetDriftCounterState: // returns not supported
+    case ClientOpcode::GetAdjustedTime: // returns not supported
+        return true;
+
+        // Commands we haven't moved yet
+    case ClientOpcode::GetVbucket:
+    case ClientOpcode::GetAllVbSeqnos:
+    case ClientOpcode::SetParam:
+    case ClientOpcode::ObserveSeqno:
+    case ClientOpcode::Observe:
+    case ClientOpcode::GetFailoverLog:
+    case ClientOpcode::LastClosedCheckpoint:
+    case ClientOpcode::ResetReplicationChain:
+    case ClientOpcode::DeregisterTapClient:
+    case ClientOpcode::SetWithMeta:
+    case ClientOpcode::SetqWithMeta:
+    case ClientOpcode::AddWithMeta:
+    case ClientOpcode::AddqWithMeta:
+    case ClientOpcode::SnapshotVbStates:
+    case ClientOpcode::VbucketBatchCount:
+    case ClientOpcode::DelWithMeta:
+    case ClientOpcode::DelqWithMeta:
+    case ClientOpcode::CreateCheckpoint:
+    case ClientOpcode::NotifyVbucketUpdate:
+    case ClientOpcode::ChangeVbFilter:
+    case ClientOpcode::CheckpointPersistence:
+    case ClientOpcode::ReturnMeta:
+    case ClientOpcode::CompactDb:
+    case ClientOpcode::SeqnoPersistence:
+    case ClientOpcode::GetKeys:
+    case ClientOpcode::CollectionsSetManifest:
+    case ClientOpcode::CollectionsGetManifest:
+    case ClientOpcode::CollectionsGetID:
+    case ClientOpcode::CollectionsGetScopeID:
+    case ClientOpcode::SubdocGet:
+    case ClientOpcode::SubdocExists:
+    case ClientOpcode::SubdocDictAdd:
+    case ClientOpcode::SubdocDictUpsert:
+    case ClientOpcode::SubdocDelete:
+    case ClientOpcode::SubdocReplace:
+    case ClientOpcode::SubdocArrayPushLast:
+    case ClientOpcode::SubdocArrayPushFirst:
+    case ClientOpcode::SubdocArrayInsert:
+    case ClientOpcode::SubdocArrayAddUnique:
+    case ClientOpcode::SubdocCounter:
+    case ClientOpcode::SubdocMultiLookup:
+    case ClientOpcode::SubdocMultiMutation:
+    case ClientOpcode::SubdocGetCount:
+        return false;
+
+        // Commands we don't _want_ to reorder
+    case ClientOpcode::Quit:
+    case ClientOpcode::Quitq:
+    case ClientOpcode::Flush:
+    case ClientOpcode::Flushq:
+    case ClientOpcode::Noop:
+    case ClientOpcode::Hello:
+    case ClientOpcode::SaslAuth:
+    case ClientOpcode::SaslStep:
+    case ClientOpcode::Shutdown:
+    case ClientOpcode::SetVbucket:
+    case ClientOpcode::DelVbucket:
+    case ClientOpcode::StopPersistence:
+    case ClientOpcode::StartPersistence:
+    case ClientOpcode::CreateBucket:
+    case ClientOpcode::DeleteBucket:
+    case ClientOpcode::SelectBucket:
+    case ClientOpcode::EnableTraffic:
+    case ClientOpcode::DisableTraffic:
+    case ClientOpcode::DropPrivilege:
+    case ClientOpcode::SetCtrlToken:
+    case ClientOpcode::EwouldblockCtl:
+    case ClientOpcode::Stat: // stat is weird as it returns multiple packets
+    case ClientOpcode::UpdateExternalUserPermissions:
+        return false;
+
+        // All of DCP is currently banned
+    case ClientOpcode::DcpOpen:
+    case ClientOpcode::DcpAddStream:
+    case ClientOpcode::DcpCloseStream:
+    case ClientOpcode::DcpStreamReq:
+    case ClientOpcode::DcpGetFailoverLog:
+    case ClientOpcode::DcpStreamEnd:
+    case ClientOpcode::DcpSnapshotMarker:
+    case ClientOpcode::DcpMutation:
+    case ClientOpcode::DcpDeletion:
+    case ClientOpcode::DcpExpiration:
+    case ClientOpcode::DcpSetVbucketState:
+    case ClientOpcode::DcpNoop:
+    case ClientOpcode::DcpBufferAcknowledgement:
+    case ClientOpcode::DcpControl:
+    case ClientOpcode::DcpSystemEvent:
+    case ClientOpcode::DcpPrepare:
+    case ClientOpcode::DcpSeqnoAcknowledged:
+    case ClientOpcode::DcpCommit:
+    case ClientOpcode::DcpAbort:
+        return false;
+
+        // Commands not supported
+    case ClientOpcode::Rget:
+    case ClientOpcode::Rset:
+    case ClientOpcode::Rsetq:
+    case ClientOpcode::Rappend:
+    case ClientOpcode::Rappendq:
+    case ClientOpcode::Rprepend:
+    case ClientOpcode::Rprependq:
+    case ClientOpcode::Rdelete:
+    case ClientOpcode::Rdeleteq:
+    case ClientOpcode::Rincr:
+    case ClientOpcode::Rincrq:
+    case ClientOpcode::Rdecr:
+    case ClientOpcode::Rdecrq:
+    case ClientOpcode::TapConnect:
+    case ClientOpcode::TapMutation:
+    case ClientOpcode::TapDelete:
+    case ClientOpcode::TapFlush:
+    case ClientOpcode::TapOpaque:
+    case ClientOpcode::TapVbucketSet:
+    case ClientOpcode::TapCheckpointStart:
+    case ClientOpcode::TapCheckpointEnd:
+        return false;
+
+    case ClientOpcode::Invalid:
+        break;
+    }
+
+    throw std::invalid_argument(
+            "isReorderSupported(cb::mcbp::ClientOpcode): Invalid opcode: " +
+            std::to_string(int(opcode)));
+}

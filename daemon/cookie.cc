@@ -23,6 +23,7 @@
 #include "mcaudit.h"
 #include "mcbp.h"
 #include "mcbp_executors.h"
+#include "memcached.h"
 #include "settings.h"
 
 #include <logger/logger.h>
@@ -113,6 +114,10 @@ const std::string& Cookie::getErrorJson() {
 }
 
 bool Cookie::execute() {
+    if (!validated) {
+        throw std::runtime_error("Cookie::execute: validate() not called");
+    }
+
     // Reset ewouldblock state!
     setEwouldblock(false);
     const auto& header = getHeader();
@@ -124,7 +129,14 @@ bool Cookie::execute() {
         execute_request_packet(*this, header.getRequest());
     }
 
-    return !isEwouldblock();
+    if (isEwouldblock()) {
+        return false;
+    }
+
+    // @todo update command timers!!!! it could be a member of this
+    //       class...
+    mcbp_collect_timings(*this);
+    return true;
 }
 
 void Cookie::setPacket(const cb::mcbp::Header& header, bool copy) {
@@ -140,7 +152,9 @@ void Cookie::setPacket(const cb::mcbp::Header& header, bool copy) {
 
 cb::const_byte_buffer Cookie::getPacket() const {
     if (packet == nullptr) {
-        throw std::logic_error("Cookie::getPacket(): packet not available");
+        return {};
+        //        throw std::logic_error("Cookie::getPacket(): packet not
+        //        available");
     }
 
     return packet->getFrame();
@@ -205,7 +219,6 @@ void Cookie::sendDynamicBuffer() {
                 {dynamicBuffer.getRoot(), dynamicBuffer.getOffset()},
                 cookie_free_dynbuffer,
                 dynamicBuffer.getRoot());
-        connection.setState(StateMachine::State::send_data);
         dynamicBuffer.takeOwnership();
     }
 }
@@ -222,7 +235,6 @@ void Cookie::sendNotMyVBucket() {
                         0,
                         0,
                         PROTOCOL_BINARY_RAW_BYTES);
-        connection.setState(StateMachine::State::send_data);
         return;
     }
 
@@ -234,7 +246,6 @@ void Cookie::sendNotMyVBucket() {
                     uint32_t(pair.second->size()),
                     PROTOCOL_BINARY_DATATYPE_JSON);
     connection.copyToOutputStream({pair.second->data(), pair.second->size()});
-    connection.setState(StateMachine::State::send_data);
     connection.setClustermapRevno(pair.first);
 }
 
@@ -248,12 +259,10 @@ void Cookie::sendResponse(cb::mcbp::Status status) {
             // normally updates the responseCounters).
             auto& bucket = connection.getBucket();
             ++bucket.responseCounters[int(cb::mcbp::Status::Success)];
-            connection.setState(StateMachine::State::new_cmd);
             return;
         }
 
         mcbp_add_header(*this, status, 0, 0, 0, PROTOCOL_BINARY_RAW_BYTES);
-        connection.setState(StateMachine::State::send_data);
         return;
     }
 
@@ -310,7 +319,6 @@ void Cookie::sendResponse(cb::mcbp::Status status,
     connection.copyToOutputStream(extras);
     connection.copyToOutputStream(key);
     connection.copyToOutputStream(value);
-    connection.setState(StateMachine::State::send_data);
 }
 
 const DocKey Cookie::getRequestKey() const {
@@ -432,6 +440,8 @@ Cookie::Cookie(Connection& conn) : connection(conn) {
 
 void Cookie::initialize(const cb::mcbp::Header& header, bool tracing_enabled) {
     reset();
+    validated = false;
+    reorder = false;
     enableTracing = tracing_enabled;
     setPacket(header);
     setCas(0);
@@ -497,6 +507,7 @@ cb::mcbp::Status Cookie::validate() {
         }
     } // We don't currently have any validators for response packets
 
+    validated = true;
     return cb::mcbp::Status::Success;
 }
 

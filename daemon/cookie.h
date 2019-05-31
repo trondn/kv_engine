@@ -69,6 +69,11 @@ public:
      */
     void initialize(const cb::mcbp::Header& packet, bool tracing_enabled);
 
+    /// Is this object initialized or not..
+    bool empty() const {
+        return packet == nullptr;
+    }
+
     /**
      * Validates the packet content, and (possibly) set the error
      * state and reason.
@@ -496,9 +501,24 @@ public:
      */
     CookieTraceContext extractTraceContext();
 
+    bool isValidated() const {
+        return validated;
+    }
+
+    void setReorder() {
+        reorder = true;
+    }
+
+    bool mayReorder() const {
+        return reorder;
+    }
+
 protected:
     bool enableTracing = false;
     cb::tracing::Tracer tracer;
+    bool validated = false;
+
+    bool reorder = false;
 
     /// The tracing context provided by the client to use as the
     /// parent span

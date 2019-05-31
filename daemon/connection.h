@@ -19,7 +19,6 @@
 #include "datatype.h"
 #include "dynamic_buffer.h"
 #include "sendbuffer.h"
-#include "statemachine.h"
 #include "stats.h"
 #include "task.h"
 
@@ -37,10 +36,10 @@
 
 #include <array>
 #include <chrono>
+#include <list>
 #include <memory>
 #include <queue>
 #include <string>
-#include <vector>
 
 class Bucket;
 class Cookie;
@@ -370,34 +369,6 @@ public:
      */
     void enqueueServerEvent(std::unique_ptr<ServerEvent> event);
 
-    /**
-     * Close the connection. If there is any references to the connection
-     * or the cookies we'll enter the "pending close" state to wait for
-     * these operations to complete before changing state to immediate
-     * close.
-     *
-     * @return true if the state machinery could be continued, false if
-     *              we'd need external input in order to continue to drive
-     *              the state machinery
-     */
-    bool close();
-
-    /**
-     * fire ON_DISCONNECT for all of the cookie objects (in case the
-     * underlying engine keeps track of any of them)
-     */
-    void propagateDisconnect() const;
-
-    void setState(StateMachine::State next_state);
-
-    StateMachine::State getState() const {
-        return stateMachine.getCurrentState();
-    }
-
-    const char* getStateName() const {
-        return stateMachine.getCurrentStateName();
-    }
-
     bool isDCP() const {
         return dcp;
     }
@@ -578,14 +549,6 @@ public:
      */
     bool tryAuthFromSslCert(const std::string& userName);
 
-    bool shouldDelete();
-
-    void runEventLoop();
-
-    Cookie& getCookieObject() {
-        return *cookies.front();
-    }
-
     /**
      * Get the number of cookies currently bound to this connection
      */
@@ -630,6 +593,11 @@ public:
     }
 
     bool selectedBucketIsXattrEnabled() const;
+
+    /**
+     * Initiate shutdown of this connection
+     */
+    void shutdown();
 
     /**
      * Try to process some of the server events. This may _ONLY_ be performed
@@ -801,13 +769,27 @@ protected:
     explicit Connection(FrontEndThread& thr);
 
     /**
+     * Close the connection. If there is any references to the connection
+     * or the cookies we'll enter the "pending close" state to wait for
+     * these operations to complete before changing state to immediate
+     * close.
+     */
+    void close();
+
+    /**
+     * fire ON_DISCONNECT for all of the cookie objects (in case the
+     * underlying engine keeps track of any of them)
+     */
+    void propagateDisconnect() const;
+
+    enum class State { running, closing, pending_close, immediate_close };
+
+    /**
      * Update the description string for the connection. This
      * method should be called every time the authentication data
      * (or the sockname/peername) changes
      */
     void updateDescription();
-
-    void runStateMachinery();
 
     // Shared DCP_DELETION write function for the v1/v2 commands.
     ENGINE_ERROR_CODE deletionInner(const item_info& info,
@@ -965,7 +947,7 @@ protected:
     /**
      * The state machine we're currently using
      */
-    StateMachine stateMachine;
+    State state{State::running};
 
     /** Is this connection used by a DCP connection? */
     bool dcp = false;
@@ -1027,7 +1009,7 @@ protected:
      * commands at the same time and they're all stored in this
      * vector)
      */
-    std::vector<std::unique_ptr<Cookie>> cookies;
+    std::list<std::unique_ptr<Cookie>> cookies;
 
     Datatype datatype;
 
@@ -1054,6 +1036,7 @@ protected:
         bool term{false};
     } sendQueueInfo;
 
+    std::atomic<size_t> num_callbacks{0};
 public:
     /**
      * Given that we "ack" the writing once we drain the write buffer in
@@ -1075,8 +1058,13 @@ public:
     size_t getSendQueueSize() const;
 
 protected:
-    static void read_callback(bufferevent*, void* ctx);
-    static void write_callback(bufferevent*, void* ctx);
+    void checkSendQueueStuck(std::chrono::steady_clock::time_point now);
+
+    void executeWithOutOfOrder();
+
+    bool executeCommandsCallback();
+
+    static void rw_callback(bufferevent*, void* ctx);
     static void event_callback(bufferevent*, short event, void* ctx);
     /**
      * The initial read callback for SSL connections and perform

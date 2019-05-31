@@ -71,11 +71,10 @@ void dcp_prepare_executor(Cookie& cookie) {
     ret = connection.remapErrorCode(ret);
     switch (ret) {
     case ENGINE_SUCCESS:
-        connection.setState(StateMachine::State::new_cmd);
         break;
 
     case ENGINE_DISCONNECT:
-        connection.setState(StateMachine::State::closing);
+        connection.shutdown();
         break;
 
     case ENGINE_EWOULDBLOCK:

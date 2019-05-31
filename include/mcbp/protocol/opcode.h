@@ -414,6 +414,13 @@ enum class ServerOpcode {
 bool is_valid_opcode(ClientOpcode opcode);
 bool is_valid_opcode(ServerOpcode opcode);
 
+/**
+ * Is reorder supported for a given opcode?
+ *
+ * @return true if the internals supports reorder of the command
+ */
+bool isReorderSupported(ClientOpcode opcode);
+
 } // namespace mcbp
 } // namespace cb
 

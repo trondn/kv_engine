@@ -746,7 +746,7 @@ bool is_bucket_dying(Connection& c) {
                 "connection {}",
                 c.getId(),
                 c.getDescription());
-        c.setState(StateMachine::State::closing);
+        c.shutdown();
         return true;
     }
 
@@ -1568,7 +1568,7 @@ struct ServerCookieApi : public ServerCookieIface {
                 c->getId(),
                 priority,
                 c->getDescription());
-        c->setState(StateMachine::State::closing);
+        c->shutdown();
     }
 
     CONN_PRIORITY get_priority(
