@@ -42,7 +42,6 @@ public:
 
     explicit GetLockedCommandContext(Cookie& cookie)
         : SteppableCommandContext(cookie),
-          key(cookie.getRequestKey()),
           vbucket(cookie.getRequest().getVBucket()),
           lock_timeout(get_exptime(cookie.getRequest())),
           state(State::GetAndLockItem) {
@@ -123,7 +122,6 @@ private:
         return ntohl(*exp);
     }
 
-    const DocKey key;
     const Vbid vbucket;
     const uint32_t lock_timeout;
 

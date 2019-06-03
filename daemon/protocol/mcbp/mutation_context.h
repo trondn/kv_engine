@@ -110,12 +110,10 @@ protected:
 
 private:
     const ENGINE_STORE_OPERATION operation;
-    const DocKey key;
-    cb::const_byte_buffer value;
 
     /// If the incoming value was compressed; then this will hold the
     /// decompressed form of it once the validateInput() state has been
-    // executed.
+    /// executed.
     cb::compression::Buffer decompressed_value;
 
     const Vbid vbucket;
